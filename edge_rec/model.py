@@ -29,6 +29,10 @@ def modulate(scale, shift=None):
     return _modify
 
 
+def idx(spec, **lengths):
+    return lambda x: rearrange(x, spec, **lengths)
+
+
 class pipe:
     extract = None
 
@@ -52,6 +56,63 @@ def get_kwargs(kwargs, **defaults):
     if kwargs is None:
         kwargs = {}
     return {**defaults, **kwargs}
+
+
+class MovieLensFeatureEmb(nn.Module):
+    MAX_N_GENRES = 6
+
+    def __init__(self, age_dim=4, gender_dim=4, occupation_dim=8, genre_dim=16, add_genres=False):
+        super().__init__()
+
+        self.age_embedding = nn.Embedding(
+            num_embeddings=6,
+            embedding_dim=age_dim
+        )
+        self.gender_embedding = nn.Embedding(
+            num_embeddings=2,
+            embedding_dim=gender_dim
+        )
+        self.occupation_embedding = nn.Embedding(
+            num_embeddings=21,
+            embedding_dim=occupation_dim
+        )
+        self.genre_embedding = nn.Embedding(
+            num_embeddings=19,
+            embedding_dim=genre_dim
+        )
+
+        self.age_dim = age_dim
+        self.gender_dim = gender_dim
+        self.occupation_dim = occupation_dim
+        self.genre_dim = genre_dim
+        self.add_genres = add_genres
+
+    @property
+    def combined_genre_dim(self):
+        return self.genre_dim * (1 if self.add_genres else self.MAX_N_GENRES)
+
+    @property
+    def embed_dim(self):
+        return self.age_dim + self.gender_dim + self.occupation_dim + self.combined_genre_dim + 1
+
+    def forward(self, x):
+        # dims = [ft, user, movie]
+        # ft = [1 rating, 6 genres, --> these are all bogus rn --> 1 age, 1 gender, 1 occupation]
+        assert x.shape[1] == 4 + self.MAX_N_GENRES
+        # x.shape = (b, f, n, m)
+        b, _, n, m = x.shape
+        if self.add_genres:
+            collapse_genres = lambda z: z.swapdims(1, -1).sum(dim=-1)
+        else:
+            collapse_genres = idx('b f n m e -> b (f e) n m')
+        rating_embeds = x[:, 0:1]
+        genre_embeds = pipe(x[:, 1:7]) | self.genre_embedding | collapse_genres | pipe.extract
+        age_embeds = pipe(x[:, 7]) | self.age_embedding | idx('b n m e -> b e n m') | pipe.extract
+        gender_embeds = pipe(x[:, 8]) | self.gender_embedding | idx('b n m e -> b e n m') | pipe.extract
+        occupation_embeds = pipe(x[:, 9]) | self.occupation_embedding | idx('b n m e -> b e n m') | pipe.extract
+        full_embeds = torch.cat([rating_embeds, genre_embeds, age_embeds, gender_embeds, occupation_embeds], dim=1)
+        assert full_embeds.shape[1] == self.embed_dim
+        return full_embeds
 
 
 # sinusoidal positional embeds
@@ -139,7 +200,7 @@ class SubgraphAttnModel(nn.Module):
         """
         time_embeds = self.time_embed_initial(times)
         for block in self.blocks:
-            block_time_embeds = rearrange(block["time_embed"](time_embeds), 'b c -> b c 1 1')
+            block_time_embeds = pipe(time_embeds) | block["time_embed"] | idx('b c -> b c 1 1') | pipe.extract
             t = tuple(block_time_embeds.chunk(9, dim=1))
 
             subgraph = pipe(subgraph) | block["layer_norm_1"] | modulate(t[0], t[1]) | pipe.extract
