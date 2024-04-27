@@ -61,8 +61,8 @@ def identity(t, *args, **kwargs):
 
 def cycle(dl):
     while True:
-        for data in dl:
-            yield data
+        for (data, mask) in dl:
+            yield (data, mask)
 
 
 def has_int_squareroot(num):

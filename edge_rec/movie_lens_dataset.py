@@ -200,7 +200,7 @@ class ProcessedMovieLens(Dataset):
             )
         
         edge_mask = (rating_matrix != -10)
-        rating_matrix[edge_mask] = 0
+        rating_matrix[~edge_mask] = 0
 
         item = torch.cat([
             rating_matrix.reshape((1, n_unique, n_unique)),
