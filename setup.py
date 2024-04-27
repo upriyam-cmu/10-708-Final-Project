@@ -9,7 +9,7 @@ setup(
         'ema-pytorch>=0.4.2',
         'numpy',
         'pillow',
-        'pytorch-fid',
+        'packaging',
         'torch',
         'torchvision',
         'tqdm',
@@ -22,4 +22,3 @@ setup(
     url="none",
     packages=["edge_rec"],
 )
-

@@ -33,6 +33,10 @@ def idx(spec, **lengths):
     return lambda x: rearrange(x, spec, **lengths)
 
 
+def toi(x):
+    return x.long()
+
+
 class pipe:
     extract = None
 
@@ -108,10 +112,10 @@ class MovieLensFeatureEmb(nn.Module):
             collapse_genres = idx('b f n m e -> b (f e) n m')
 
         rating_embeds = x[:, 0:1]
-        genre_embeds = pipe(x[:, 1:7]) | self.genre_embedding | collapse_genres | pipe.extract
-        age_embeds = pipe(x[:, 7]) | self.age_embedding | idx('b n m e -> b e n m') | pipe.extract
-        gender_embeds = pipe(x[:, 8]) | self.gender_embedding | idx('b n m e -> b e n m') | pipe.extract
-        occupation_embeds = pipe(x[:, 9]) | self.occupation_embedding | idx('b n m e -> b e n m') | pipe.extract
+        genre_embeds = pipe(x[:, 1:7]) | toi | self.genre_embedding | collapse_genres | pipe.extract
+        age_embeds = pipe(x[:, 7]) | toi | self.age_embedding | idx('b n m e -> b e n m') | pipe.extract
+        gender_embeds = pipe(x[:, 8]) | toi | self.gender_embedding | idx('b n m e -> b e n m') | pipe.extract
+        occupation_embeds = pipe(x[:, 9]) | toi | self.occupation_embedding | idx('b n m e -> b e n m') | pipe.extract
 
         full_embeds = torch.cat([rating_embeds, genre_embeds, age_embeds, gender_embeds, occupation_embeds], dim=1)
         assert full_embeds.shape[1] == self.embed_dim
@@ -242,4 +246,4 @@ class GraphReconstructionModel(nn.Module):
 
 if __name__ == '__main__':
     model = GraphReconstructionModel.default()
-    model(torch.randint(0, 2, (1, 10, 8, 9)), torch.tensor([1]))
+    model(torch.rand(1, 10, 8, 9), torch.tensor([1]))
