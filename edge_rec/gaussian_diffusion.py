@@ -5,6 +5,7 @@ from random import random
 from functools import partial
 from collections import namedtuple
 from multiprocessing import cpu_count
+import numpy as np
 
 import torch
 import pickle as pkl
@@ -654,7 +655,7 @@ class Trainer(object):
                             val_loss = self.model(eval_data)
                             val_sample = self.ema.ema_model.sample(eval_data)
                             print(f"Validation Loss: {val_loss.item()}")
-                            val_sample[:,0,:,:].cpu().detach().numpy().save("sample-{self.step}.npy")
+                            np.save("sample-{self.step}.npy", val_sample[:,0,:,:].cpu().detach().numpy())
                             
 
                 pbar.update(1)
