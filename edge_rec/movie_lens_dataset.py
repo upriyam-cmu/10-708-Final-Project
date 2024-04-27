@@ -208,7 +208,12 @@ class ProcessedMovieLens(Dataset):
             broadcasted_user_feats
         ], dim=0)
 
-        return (item, edge_mask)
+        out = torch.cat([
+            item,
+            edge_mask[None,:,:]
+        ], dim=0)
+
+        return out
 
     def __len__(self):
         return self.n_subsamples
