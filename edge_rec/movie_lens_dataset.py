@@ -192,7 +192,7 @@ class ProcessedMovieLens(Dataset):
             )
         )
 
-        rating_matrix = torch.Tensor(pd.DataFrame(subsample_edges).pivot(columns=[1], index=[0]).fillna(0).to_numpy())
+        rating_matrix = torch.Tensor(pd.DataFrame(subsample_edges).pivot(columns=[1], index=[0]).fillna(-10).to_numpy())
         item = torch.cat([
             rating_matrix.reshape((1, n_unique, n_unique)),
             broadcasted_movie_feats,

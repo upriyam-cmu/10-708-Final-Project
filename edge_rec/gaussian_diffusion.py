@@ -450,7 +450,8 @@ class GaussianDiffusion(nn.Module):
             noise += offset_noise_strength * rearrange(offset_noise, 'b c -> b c 1 1')
 
         # noise sample
-
+        mask = x_start[:,0,:,:] == -10
+        x_start[:,0,:,:][mask] = 0
         x = self.q_sample(x_start=x_start, t=t, noise=noise)
 
         # if doing self-conditioning, 50% of the time, predict x_start from current set of times
@@ -460,6 +461,7 @@ class GaussianDiffusion(nn.Module):
         # predict and take gradient step
         # print(x.shape, t.shape)
         model_out = self.model(x, t)
+        model_out[mask] = 0
 
         if self.objective == 'pred_noise':
             target = noise[:, 0, :, :]
@@ -470,7 +472,7 @@ class GaussianDiffusion(nn.Module):
             target = v
         else:
             raise ValueError(f'unknown objective {self.objective}')
-
+        
         loss = F.mse_loss(model_out, target, reduction='none')
         loss = reduce(loss, 'b ... -> b', 'mean')
 
