@@ -98,20 +98,23 @@ class MovieLensFeatureEmb(nn.Module):
     def forward(self, x):
         # dims = [ft, user, movie]
         # ft = [1 rating, 6 genres, --> these are all bogus rn --> 1 age, 1 gender, 1 occupation]
-        assert x.shape[1] == 4 + self.MAX_N_GENRES
         # x.shape = (b, f, n, m)
-        b, _, n, m = x.shape
+        assert x.shape[1] == 4 + self.MAX_N_GENRES
+
         if self.add_genres:
             collapse_genres = lambda z: z.swapdims(1, -1).sum(dim=-1)
         else:
             collapse_genres = idx('b f n m e -> b (f e) n m')
+
         rating_embeds = x[:, 0:1]
         genre_embeds = pipe(x[:, 1:7]) | self.genre_embedding | collapse_genres | pipe.extract
         age_embeds = pipe(x[:, 7]) | self.age_embedding | idx('b n m e -> b e n m') | pipe.extract
         gender_embeds = pipe(x[:, 8]) | self.gender_embedding | idx('b n m e -> b e n m') | pipe.extract
         occupation_embeds = pipe(x[:, 9]) | self.occupation_embedding | idx('b n m e -> b e n m') | pipe.extract
+
         full_embeds = torch.cat([rating_embeds, genre_embeds, age_embeds, gender_embeds, occupation_embeds], dim=1)
         assert full_embeds.shape[1] == self.embed_dim
+
         return full_embeds
 
 
@@ -179,15 +182,12 @@ class SubgraphAttnModel(nn.Module):
 
             modules["layer_norm_1"] = RMSNorm(in_dim)
 
-            # noinspection PyArgumentList
             modules["row_attn"] = Attention(**attn_kwargs, dim=in_dim)
-            # noinspection PyArgumentList
             modules["col_attn"] = Attention(**attn_kwargs, dim=in_dim)
 
             modules["layer_norm_2"] = RMSNorm(2 * in_dim)
             modules["residual_transform"] = nn.Conv2d(2 * in_dim, out_dim, 1)
 
-            # noinspection PyArgumentList
             modules["feed_forward"] = build_feed_forward(
                 **feed_forward_kwargs,
                 in_dim=2 * in_dim,

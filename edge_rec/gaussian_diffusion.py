@@ -161,8 +161,8 @@ class GaussianDiffusion(nn.Module):
 
         self.objective = objective
 
-        assert objective in {'pred_noise', 'pred_x0',
-                             'pred_v'}, 'objective must be either pred_noise (predict noise) or pred_x0 (predict image start) or pred_v (predict v [v-parameterization as defined in appendix D of progressive distillation paper, used in imagen-video successfully])'
+        assert objective in {'pred_noise', 'pred_x0', 'pred_v'}, \
+            'objective must be either pred_noise (predict noise) or pred_x0 (predict image start) or pred_v (predict v [v-parameterization as defined in appendix D of progressive distillation paper, used in imagen-video successfully])'
 
         if beta_schedule == 'linear':
             beta_schedule_fn = linear_beta_schedule
@@ -530,7 +530,7 @@ class Trainer(object):
         self.batch_size = train_batch_size
         self.gradient_accumulate_every = gradient_accumulate_every
         assert (
-                           train_batch_size * gradient_accumulate_every) >= 16, f'your effective batch size (train_batch_size x gradient_accumulate_every) should be at least 16 or above'
+                       train_batch_size * gradient_accumulate_every) >= 16, f'your effective batch size (train_batch_size x gradient_accumulate_every) should be at least 16 or above'
 
         self.train_num_steps = train_num_steps
         self.image_size = diffusion_model.image_size
