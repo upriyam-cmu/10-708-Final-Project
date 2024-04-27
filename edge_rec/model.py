@@ -181,9 +181,13 @@ class SubgraphAttnModel(nn.Module):
             modules = nn.ModuleDict()
             self.blocks.append(modules)
 
-            modules["time_embed"] = nn.Sequential(
+            modules["time_embed_1"] = nn.Sequential(
                 nn.SiLU(),
-                nn.Linear(4 * feature_dim, 8 * in_dim + 1)
+                nn.Linear(4 * feature_dim, 8 * in_dim)
+            )
+            modules["time_embed_2"] = nn.Sequential(
+                nn.SiLU(),
+                nn.Linear(4 * feature_dim, out_dim)
             )
 
             modules["layer_norm_1"] = RMSNorm(in_dim)
@@ -206,8 +210,9 @@ class SubgraphAttnModel(nn.Module):
         """
         time_embeds = self.time_embed_initial(times)
         for block in self.blocks:
-            block_time_embeds = pipe(time_embeds) | block["time_embed"] | idx('b c -> b c 1 1') | pipe.extract
-            t, t2 = tuple(block_time_embeds[:, :-1].chunk(8, dim=1)), block_time_embeds[:, -1:]
+            block_time_embeds_1 = pipe(time_embeds) | block["time_embed_1"] | idx('b c -> b c 1 1') | pipe.extract
+            block_time_embeds_2 = pipe(time_embeds) | block["time_embed_2"] | idx('b c -> b c 1 1') | pipe.extract
+            t, t2 = tuple(block_time_embeds_1.chunk(8, dim=1)), block_time_embeds_2
 
             subgraph = pipe(subgraph) | block["layer_norm_1"] | modulate(t[0], t[1]) | pipe.extract
             row_attn = pipe(subgraph) | block["row_attn"] | modulate(t[2]) | pipe.extract
