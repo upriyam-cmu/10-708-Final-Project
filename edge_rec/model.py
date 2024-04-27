@@ -61,7 +61,8 @@ def get_kwargs(kwargs, **defaults):
 class MovieLensFeatureEmb(nn.Module):
     MAX_N_GENRES = 6
 
-    def __init__(self, age_dim=4, gender_dim=4, occupation_dim=8, genre_dim=16, add_genres=False):
+    def __init__(self, age_dim=4, gender_dim=3, occupation_dim=8, genre_dim=16, add_genres=True):
+        # NB: embed_dim should be even
         super().__init__()
 
         self.age_embedding = nn.Embedding(
@@ -123,6 +124,7 @@ class MovieLensFeatureEmb(nn.Module):
 class SinusoidalPosEmb(nn.Module):
     def __init__(self, dim, theta=10000):
         super().__init__()
+        assert divisible_by(dim, 2)
         self.dim = dim
         self.theta = theta
 
@@ -208,12 +210,36 @@ class SubgraphAttnModel(nn.Module):
             col_attn = pipe(subgraph) | T | block["col_attn"] | T | modulate(t[3]) | pipe.extract
             merged = torch.cat([row_attn + 0.5 * subgraph, col_attn + 0.5 * subgraph], dim=1)
             normed = pipe(merged) | block["layer_norm_2"] | modulate(t[4:6], t[6:8]) | pipe.extract
-            projected = pipe(normed) | block["feed_forward"] | modulate(t[8]) | pipe.extract
+            projected = pipe(normed) | block["feed_forward"] | modulate(t[8][:, :1]) | pipe.extract
             residual = pipe(merged) | block["residual_transform"] | pipe.extract
             subgraph = projected + residual
         return subgraph
 
 
+class GraphReconstructionModel(nn.Module):
+    def __init__(self, feature_embedding, subgraph_model):
+        super().__init__()
+        self.embedding = feature_embedding
+        self.core_model = subgraph_model
+
+    def forward(self, x, t):
+        x = self.embedding(x)
+        out = self.core_model(x, t)
+        assert out.shape[1] == 1
+        return out.squeeze(dim=1)
+
+    @staticmethod
+    def default():
+        embed = MovieLensFeatureEmb()
+        return GraphReconstructionModel(
+            embed,
+            SubgraphAttnModel(
+                embed.embed_dim, [],
+                SinusoidalPosEmb(embed.embed_dim)
+            )
+        )
+
+
 if __name__ == '__main__':
-    model = SubgraphAttnModel(10, [], SinusoidalPosEmb(10))
-    model(torch.rand(1, 10, 8, 9), torch.tensor([1]))
+    model = GraphReconstructionModel.default()
+    model(torch.randint(0, 2, (1, 10, 8, 9)), torch.tensor([1]))
