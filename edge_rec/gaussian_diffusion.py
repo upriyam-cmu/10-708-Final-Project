@@ -7,6 +7,7 @@ from collections import namedtuple
 from multiprocessing import cpu_count
 import numpy as np
 
+import numpy as np
 import torch
 import pickle as pkl
 from torch import nn, einsum
@@ -649,14 +650,16 @@ class Trainer(object):
                         with torch.inference_mode():
                             eval_data = next(self.dl).to(device)
                             b, c, h, w = eval_data.shape
-                            random_rating = torch.randn(b,h,w)
-                            eval_data[:,0,:,:] = random_rating
+                            random_rating = torch.randn(b, h, w)
+                            eval_data[:, 0, :, :] = random_rating
 
                             val_loss = self.model(eval_data)
                             val_sample = self.ema.ema_model.sample(eval_data)
                             print(f"Validation Loss: {val_loss.item()}")
-                            np.save(f"{self.results_folder}/sample-{self.step}.npy", val_sample[:,0,:,:].cpu().detach().numpy())
-                            
+                            np.save(
+                                f"{self.results_folder}/sample-{self.step}.npy",
+                                val_sample[:, 0, :, :].cpu().detach().numpy()
+                            )
 
                 pbar.update(1)
 
