@@ -179,7 +179,7 @@ class SubgraphAttnModel(nn.Module):
 
             modules["time_embed"] = nn.Sequential(
                 nn.SiLU(),
-                nn.Linear(4 * feature_dim, 9 * in_dim)
+                nn.Linear(4 * feature_dim, 8 * in_dim + 1)
             )
 
             modules["layer_norm_1"] = RMSNorm(in_dim)
@@ -203,14 +203,14 @@ class SubgraphAttnModel(nn.Module):
         time_embeds = self.time_embed_initial(times)
         for block in self.blocks:
             block_time_embeds = pipe(time_embeds) | block["time_embed"] | idx('b c -> b c 1 1') | pipe.extract
-            t = tuple(block_time_embeds.chunk(9, dim=1))
+            t, t2 = tuple(block_time_embeds[:, :-1].chunk(8, dim=1)), block_time_embeds[:, -1:]
 
             subgraph = pipe(subgraph) | block["layer_norm_1"] | modulate(t[0], t[1]) | pipe.extract
             row_attn = pipe(subgraph) | block["row_attn"] | modulate(t[2]) | pipe.extract
             col_attn = pipe(subgraph) | T | block["col_attn"] | T | modulate(t[3]) | pipe.extract
             merged = torch.cat([row_attn + 0.5 * subgraph, col_attn + 0.5 * subgraph], dim=1)
             normed = pipe(merged) | block["layer_norm_2"] | modulate(t[4:6], t[6:8]) | pipe.extract
-            projected = pipe(normed) | block["feed_forward"] | modulate(t[8][:, :1]) | pipe.extract
+            projected = pipe(normed) | block["feed_forward"] | modulate(t2) | pipe.extract
             residual = pipe(merged) | block["residual_transform"] | pipe.extract
             subgraph = projected + residual
         return subgraph
