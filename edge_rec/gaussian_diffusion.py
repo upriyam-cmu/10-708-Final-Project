@@ -25,7 +25,7 @@ from ema_pytorch import EMA
 
 from accelerate import Accelerator
 
-from movie_lens_dataset import ProcessedMovieLens, RatingQuantileTransform, rating_transform
+from edge_rec.movie_lens_dataset import ProcessedMovieLens, RatingQuantileTransform, rating_transform
 
 ModelPrediction = namedtuple('ModelPrediction', ['pred_noise', 'pred_x_start'])
 
@@ -455,7 +455,7 @@ class GaussianDiffusion(nn.Module):
         # this technique will slow down training by 25%, but seems to lower FID significantly
 
         # predict and take gradient step
-        print(x.shape, t.shape)
+        # print(x.shape, t.shape)
         model_out = self.model(x, t)
 
         if self.objective == 'pred_noise':
