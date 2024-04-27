@@ -7,6 +7,7 @@ from collections import namedtuple
 from multiprocessing import cpu_count
 
 import torch
+import pickle as pkl
 from torch import nn, einsum
 from torch.cuda.amp import autocast
 import torch.nn.functional as F
@@ -645,14 +646,18 @@ class Trainer(object):
                         self.ema.ema_model.eval()
 
                         with torch.inference_mode():
-                            milestone = self.step // self.save_and_sample_every
-                            batches = num_to_groups(self.num_samples, self.batch_size)
-                            all_images_list = list(map(lambda n: self.ema.ema_model.sample(batch_size=n), batches))
+                            eval_data = next(self.dl).to(device)
+                            b, c, h, w = eval_data.shape
+                            random_rating = torch.randn(b,h,w)
+                            eval_data[:,0,:,:] = random_rating
 
-                        all_images = torch.cat(all_images_list, dim=0)
+                            val_loss = self.model(eval_data)
+                            val_sample = self.ema.ema_model.sample(eval_data)
+                            print(f"Validation Loss: {val_loss.item()}")
 
-                        utils.save_image(all_images, str(self.results_folder / f'sample-{milestone}.png'),
-                                         nrow=int(math.sqrt(self.num_samples)))
+                            with open(f"sample-{self.step}.pkl", 'w+') as f:
+                                f.dump(val_sample[:,0,:,:].cpu().detach().numpy())
+                            
 
                 pbar.update(1)
 
