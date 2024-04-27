@@ -622,15 +622,9 @@ class Trainer(object):
                 total_loss = 0.
 
                 for _ in range(self.gradient_accumulate_every):
-<<<<<<< HEAD
                     data = next(self.dl).to(device)
                     edge_mask = data[:,-1,:,:].bool()
                     data = data[:,:-1,:,:]
-=======
-                    data, edge_mask = next(self.dl)
-                    data = data.to(device)
-                    edge_mask = edge_mask.to(device)
->>>>>>> 9c50000 (wip)
                     
                     with self.accelerator.autocast():
                         loss = self.model(data, edge_mask)
@@ -657,16 +651,10 @@ class Trainer(object):
                         self.ema.ema_model.eval()
 
                         with torch.inference_mode():
-<<<<<<< HEAD
                             eval_data = next(self.dl).to(device)
                             edge_mask = eval_data[:,-1,:,:].bool()
                             eval_data = eval_data[:,:-1,:,:]
                             
-=======
-                            eval_data, edge_mask = next(self.dl)
-                            eval_data = eval_data.to(device)
-                            edge_mask = edge_mask.to(device)
->>>>>>> 9c50000 (wip)
                             b, c, h, w = eval_data.shape
                             random_rating = torch.randn(b, h, w)
                             eval_data[:, 0, :, :] = random_rating
