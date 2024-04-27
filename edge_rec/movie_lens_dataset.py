@@ -139,7 +139,7 @@ class RatingQuantileTransform(object):
 class ProcessedMovieLens(Dataset):
     PROCESSED_ML_SUBPATH = "/processed/data.pt"
 
-    def __init__(self, root, n_subsamples=100, n_unique_per_sample=10, dataset_transform=None, transform=None,
+    def __init__(self, root, n_subsamples=10000, n_unique_per_sample=10, dataset_transform=None, transform=None,
                  download=True):
         if download:
             self.ml_1m = RawMovieLens1M(root, force_reload=True)
@@ -192,14 +192,23 @@ class ProcessedMovieLens(Dataset):
             )
         )
 
-        rating_matrix = torch.Tensor(pd.DataFrame(subsample_edges).pivot(columns=[1], index=[0]).fillna(-10).to_numpy())
+        rating_matrix = torch.Tensor(
+            pd.DataFrame(subsample_edges)
+              .pivot(columns=[1], index=[0])
+              .fillna(-10)
+              .to_numpy()
+            )
+        
+        edge_mask = (rating_matrix != -10)
+        rating_matrix[edge_mask] = 0
+
         item = torch.cat([
             rating_matrix.reshape((1, n_unique, n_unique)),
             broadcasted_movie_feats,
             broadcasted_user_feats
         ], dim=0)
 
-        return item
+        return (item, edge_mask)
 
     def __len__(self):
         return self.n_subsamples

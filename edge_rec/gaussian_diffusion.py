@@ -436,7 +436,7 @@ class GaussianDiffusion(nn.Module):
                 extract(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise
         )
 
-    def p_losses(self, x_start, t, noise=None, offset_noise_strength=None):
+    def p_losses(self, x_start, t, edge_mask=None, noise=None, offset_noise_strength=None):
         b, c, h, w = x_start.shape
 
         noise = default(noise, lambda: torch.randn_like(x_start))
@@ -450,8 +450,6 @@ class GaussianDiffusion(nn.Module):
             noise += offset_noise_strength * rearrange(offset_noise, 'b c -> b c 1 1')
 
         # noise sample
-        mask = x_start[:,0,:,:] == -10
-        x_start[:,0,:,:][mask] = 0
         x = self.q_sample(x_start=x_start, t=t, noise=noise)
 
         # if doing self-conditioning, 50% of the time, predict x_start from current set of times
@@ -461,7 +459,8 @@ class GaussianDiffusion(nn.Module):
         # predict and take gradient step
         # print(x.shape, t.shape)
         model_out = self.model(x, t)
-        model_out[mask] = 0
+        if edge_mask is not None:
+            model_out[~edge_mask] = 0
 
         if self.objective == 'pred_noise':
             target = noise[:, 0, :, :]
@@ -479,12 +478,12 @@ class GaussianDiffusion(nn.Module):
         loss = loss * extract(self.loss_weight, t, loss.shape)
         return loss.mean()
 
-    def forward(self, img, *args, **kwargs):
+    def forward(self, img, edge_mask=None, *args, **kwargs):
         b, c, h, w, device, img_size, = *img.shape, img.device, self.image_size
         assert h == img_size[0] and w == img_size[1], f'height and width of image must be {img_size}'
         t = torch.randint(0, self.num_timesteps, (b,), device=device).long()
 
-        return self.p_losses(img, t, *args, **kwargs)
+        return self.p_losses(img, t, edge_mask, *args, **kwargs)
 
 
 class Trainer(object):
@@ -543,7 +542,7 @@ class Trainer(object):
         self.max_grad_norm = max_grad_norm
 
         # dataset and dataloader
-        self.ds = ProcessedMovieLens(folder, n_subsamples, n_unique_per_sample=min_edges_per_subsample,
+        self.ds = ProcessedMovieLens(folder, n_subsamples, n_unique_per_sample=self.image_size,
                                      dataset_transform=rating_transform, download=True)
 
         dl = DataLoader(self.ds, batch_size=train_batch_size, shuffle=True, pin_memory=True, num_workers=cpu_count())
@@ -623,10 +622,10 @@ class Trainer(object):
                 total_loss = 0.
 
                 for _ in range(self.gradient_accumulate_every):
-                    data = next(self.dl).to(device)
-
+                    data, edge_mask = next(self.dl).to(device)
+                    
                     with self.accelerator.autocast():
-                        loss = self.model(data)
+                        loss = self.model(data, edge_mask)
                         loss = loss / self.gradient_accumulate_every
                         total_loss += loss.item()
 
@@ -650,12 +649,12 @@ class Trainer(object):
                         self.ema.ema_model.eval()
 
                         with torch.inference_mode():
-                            eval_data = next(self.dl).to(device)
+                            eval_data, edge_mask = next(self.dl).to(device)
                             b, c, h, w = eval_data.shape
                             random_rating = torch.randn(b, h, w)
                             eval_data[:, 0, :, :] = random_rating
 
-                            val_loss = self.model(eval_data)
+                            val_loss = self.model(eval_data, edge_mask)
                             val_sample = self.ema.ema_model.sample(eval_data)
                             print(f"Validation Loss: {val_loss.item()}")
                             np.save(
