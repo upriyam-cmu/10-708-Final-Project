@@ -20,6 +20,14 @@ MOVIE_HEADERS = ["movieId", "title", "genres"]
 USER_HEADERS = ["userId", "gender", "age", "occupation", "zipCode"]
 RATING_HEADERS = ['userId', 'movieId', 'rating', 'timestamp']
 
+def rating_transform(data):
+    ratings = data[2,:]
+    ratings[ratings == 1] = -5
+    ratings[ratings == 2] = -2
+    ratings[ratings == 3] = 0
+    ratings[ratings == 4] = 2
+    data[2,:] = ratings
+    return data
 
 class RawMovieLens1M(MovieLens1M):
     def __init__(self, root, transform=None, pre_transform=None, force_reload=False):
@@ -30,7 +38,7 @@ class RawMovieLens1M(MovieLens1M):
         max_genres = l.sum(axis=1).max()
         idx_list = []
         for i in range(l.shape[0]):
-            idxs = np.where(l[i, :] == 1)[0] + 1
+            idxs = np.where(l[i,:] == 1)[0] + 1
             missing = max_genres - len(idxs)
             if missing > 0:
                 idxs = np.array(list(idxs) + missing * [0])
@@ -72,13 +80,13 @@ class RawMovieLens1M(MovieLens1M):
         )
         user_mapping = {idx: i for i, idx in enumerate(df.index)}
 
-        age = df['age'].str.get_dummies().values.argmax(axis=1)[:, None]
+        age = df['age'].str.get_dummies().values.argmax(axis=1)[:,None]
         age = torch.from_numpy(age).to(torch.float)
 
-        gender = df['gender'].str.get_dummies().values[:, 0][:, None]
+        gender = df['gender'].str.get_dummies().values[:,0][:,None]
         gender = torch.from_numpy(gender).to(torch.float)
 
-        occupation = df['occupation'].str.get_dummies().values.argmax(axis=1)[:, None]
+        occupation = df['occupation'].str.get_dummies().values.argmax(axis=1)[:,None]
         occupation = torch.from_numpy(occupation).to(torch.float)
 
         data['user'].x = torch.cat([age, gender, occupation], dim=-1)
@@ -115,26 +123,23 @@ class RawMovieLens1M(MovieLens1M):
 
         self.save([data], self.processed_paths[0])
 
-
 class RatingQuantileTransform(object):
     def __init__(self):
         self.qt_transformer = QuantileTransformer(n_quantiles=5, output_distribution="normal")
 
     def __call__(self, data):
-        ratings = data[2, :]
-        data[2, :] = torch.Tensor(self.qt_transformer.fit_transform(ratings.reshape(-1, 1))).T
+        ratings = data[2,:]
+        data[2,:] = torch.Tensor(self.qt_transformer.fit_transform(ratings.reshape(-1, 1))).T
         return data
-
 
 class ProcessedMovieLens(Dataset):
     PROCESSED_ML_SUBPATH = "/processed/data.pt"
 
-    def __init__(self, root, n_subsamples=100, n_unique_per_sample=10, dataset_transform=None, transform=None,
-                 download=True):
+    def __init__(self, root, n_subsamples=100, n_unique_per_sample=10, dataset_transform=None, transform=None, download=True):
         if download:
             self.ml_1m = RawMovieLens1M(root, force_reload=True)
             self.ml_1m.process()
-
+        
         self.n_unique_per_sample = n_unique_per_sample
         self.n_subsamples = n_subsamples
         self.transform = transform
@@ -144,8 +149,8 @@ class ProcessedMovieLens(Dataset):
         self.processed_ratings = self._preprocess_ratings(self.processed_data)
 
     def _preprocess_ratings(self, data):
-        edges = data[0][('user', 'rates', 'movie')]
-        edge_ratings = torch.concatenate([edges["edge_index"], edges["rating"].reshape((1, -1))])
+        edges = data[0][('user','rates','movie')]
+        edge_ratings = torch.concatenate([edges["edge_index"], edges["rating"].reshape((1,-1))])
         return self.dataset_transform(edge_ratings)
 
     def __getitem__(self, idx):
@@ -155,7 +160,7 @@ class ProcessedMovieLens(Dataset):
 
         _, edge_size = edge_ratings.shape
         indices = torch.randint(0, edge_size, (n_unique,))
-        sampled_edges = torch.ones((1, 1))
+        sampled_edges = torch.ones((1,1))
         while len(sampled_edges[0, :].unique()) < n_unique or len(sampled_edges[1, :].unique()) < n_unique:
             indices = torch.randint(0, edge_size, (n_unique,))
             sampled_edges = edge_ratings[:, indices]
@@ -163,31 +168,21 @@ class ProcessedMovieLens(Dataset):
         xs = edge_ratings[0, indices]
         ys = edge_ratings[1, indices]
 
-        indices_xs = torch.where(torch.isin(edge_ratings[0, :], xs))[0]
-        indices_ys = torch.where(torch.isin(edge_ratings[1, :], ys))[0]
+        indices_xs = torch.where(torch.isin(edge_ratings[0,:], xs))[0]
+        indices_ys = torch.where(torch.isin(edge_ratings[1,:], ys))[0]
         subsample_edges = edge_ratings[:, np.intersect1d(indices_xs, indices_ys)].T
 
-        subsample_movie_feats = movie_feats[subsample_edges[:, 1], :]
-        subsample_user_feats = user_feats[subsample_edges[:, 0], :]
+        subsample_movie_feats = movie_feats[subsample_edges[:,1], :]
+        subsample_user_feats = user_feats[subsample_edges[:,0], :]
         subsample_user_movie_feats = torch.cat([subsample_movie_feats, subsample_user_feats], dim=1)
 
         broadcasted_movie_feats, broadcasted_user_feats = (
-            torch.broadcast_to(
-                movie_feats[ys.unique().sort().values, :].reshape((-1, 1, n_unique)),
-                (-1, n_unique, n_unique)
-            ),
-            torch.broadcast_to(
-                user_feats[xs.unique().sort().values, :].reshape((-1, n_unique, 1)),
-                (-1, n_unique, n_unique)
-            )
+            torch.broadcast_to(movie_feats[ys.unique().sort().values, :].T.reshape((-1,1,n_unique)).swapaxes(1,2), (-1,n_unique,n_unique)).swapaxes(1,2),
+            torch.broadcast_to(user_feats[xs.unique().sort().values, :].T.reshape((-1,1,n_unique)).swapaxes(1,2), (-1,n_unique,n_unique))
         )
 
-        rating_matrix = torch.Tensor(pd.DataFrame(subsample_edges).pivot(columns=[1], index=[0]).fillna(3).to_numpy())
-        item = torch.cat([
-            rating_matrix.reshape((1, n_unique, n_unique)),
-            broadcasted_movie_feats,
-            broadcasted_user_feats
-        ], dim=0)
+        rating_matrix = torch.Tensor(pd.DataFrame(subsample_edges).pivot(columns=[1], index=[0]).fillna(0).to_numpy())
+        item = torch.cat([rating_matrix.reshape((1,n_unique,n_unique)), broadcasted_movie_feats, broadcasted_user_feats], dim=0)
 
         return item
 

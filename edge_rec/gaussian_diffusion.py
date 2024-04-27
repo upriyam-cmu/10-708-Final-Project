@@ -25,7 +25,7 @@ from ema_pytorch import EMA
 
 from accelerate import Accelerator
 
-from movie_lens_dataset import ProcessedMovieLens, RatingQuantileTransform
+from movie_lens_dataset import ProcessedMovieLens, RatingQuantileTransform, rating_transform
 
 ModelPrediction = namedtuple('ModelPrediction', ['pred_noise', 'pred_x_start'])
 
@@ -539,7 +539,7 @@ class Trainer(object):
 
         # dataset and dataloader
         self.ds = ProcessedMovieLens(folder, n_subsamples, n_unique_per_sample=min_edges_per_subsample,
-                                     dataset_transform=RatingQuantileTransform(), download=True)
+                                     dataset_transform=rating_transform, download=True)
 
         dl = DataLoader(self.ds, batch_size=train_batch_size, shuffle=True, pin_memory=True, num_workers=cpu_count())
 
