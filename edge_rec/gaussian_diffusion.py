@@ -529,8 +529,8 @@ class Trainer(object):
 
         self.batch_size = train_batch_size
         self.gradient_accumulate_every = gradient_accumulate_every
-        assert (
-                       train_batch_size * gradient_accumulate_every) >= 16, f'your effective batch size (train_batch_size x gradient_accumulate_every) should be at least 16 or above'
+        assert (train_batch_size * gradient_accumulate_every) >= 16, \
+            f'your effective batch size (train_batch_size x gradient_accumulate_every) should be at least 16 or above'
 
         self.train_num_steps = train_num_steps
         self.image_size = diffusion_model.image_size
