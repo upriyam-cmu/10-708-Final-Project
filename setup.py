@@ -12,7 +12,10 @@ setup(
         'pytorch-fid',
         'torch',
         'torchvision',
-        'tqdm'
+        'tqdm',
+        'torch_geometric',
+        'scikit-learn',
+        'pandas'
     ],
     author="",
     author_email="",
