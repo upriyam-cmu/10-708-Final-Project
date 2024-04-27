@@ -542,7 +542,7 @@ class Trainer(object):
         self.max_grad_norm = max_grad_norm
 
         # dataset and dataloader
-        self.ds = ProcessedMovieLens(folder, n_subsamples, n_unique_per_sample=self.image_size,
+        self.ds = ProcessedMovieLens(folder, n_subsamples, n_unique_per_sample=self.image_size[0],
                                      dataset_transform=rating_transform, download=True)
 
         dl = DataLoader(self.ds, batch_size=train_batch_size, shuffle=True, pin_memory=True, num_workers=cpu_count())
