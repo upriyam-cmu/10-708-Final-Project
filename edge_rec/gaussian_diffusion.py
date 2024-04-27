@@ -458,7 +458,7 @@ class GaussianDiffusion(nn.Module):
 
         # predict and take gradient step
         # print(x.shape, t.shape)
-        model_out = self.model(x, t)
+        model_out = self.model(x, t, edge_mask)
         if edge_mask is not None:
             model_out[~edge_mask] = 0
 

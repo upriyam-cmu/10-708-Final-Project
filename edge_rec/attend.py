@@ -86,7 +86,7 @@ class Attend(nn.Module):
             print_once('Non-A100 GPU detected, using math or mem efficient attention if input tensor is on cuda')
             self.cuda_config = AttentionConfig(False, True, True)
 
-    def flash_attn(self, q, k, v):
+    def flash_attn(self, q, k, v, m=None):
         _, heads, q_len, _, k_len, is_cuda, device = *q.shape, k.shape[-2], q.is_cuda, q.device
 
         if exists(self.scale):
@@ -104,12 +104,13 @@ class Attend(nn.Module):
         with torch.backends.cuda.sdp_kernel(**config._asdict()):
             out = F.scaled_dot_product_attention(
                 q, k, v,
+                attn_mask=m,
                 dropout_p=self.dropout if self.training else 0.
             )
 
         return out
 
-    def forward(self, q, k, v):
+    def forward(self, q, k, v, m=None):
         """
         einstein notation
         b - batch
@@ -121,13 +122,15 @@ class Attend(nn.Module):
         q_len, k_len, device = q.shape[-2], k.shape[-2], q.device
 
         if self.flash:
-            return self.flash_attn(q, k, v)
+            return self.flash_attn(q, k, v, m)
 
         scale = default(self.scale, q.shape[-1] ** -0.5)
 
         # similarity
 
         sim = einsum(f"b h i d, b h j d -> b h i j", q, k) * scale
+        if exists(m):
+            sim = sim.masked_fill(~m, float('-inf'))
 
         # attention
 
@@ -160,7 +163,7 @@ class Attention(nn.Module):
         self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, 1, bias=False)
         self.to_out = nn.Conv2d(hidden_dim, dim, 1)
 
-    def forward(self, x):
+    def forward(self, x, m=None):
         b, c, h, w = x.shape
 
         qkv = self.to_qkv(x).chunk(3, dim=1)
@@ -169,7 +172,7 @@ class Attention(nn.Module):
         mk, mv = map(lambda t: repeat(t, 'h n d -> b h n d', b=b * w), self.mem_kv)
         k, v = map(partial(torch.cat, dim=-2), ((mk, k), (mv, v)))
 
-        out = self.attend(q, k, v)
+        out = self.attend(q, k, v, m)
 
         out = rearrange(out, '(b y) h x d -> b (h d) x y', b=b)
         return self.to_out(out)

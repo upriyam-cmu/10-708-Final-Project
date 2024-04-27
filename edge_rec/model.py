@@ -204,7 +204,7 @@ class SubgraphAttnModel(nn.Module):
                 out_dim=out_dim
             )
 
-    def forward(self, subgraph, times):
+    def forward(self, subgraph, times, mask):
         """
         subgraph: Tensor(shape=(b, f, n, m))
         """
@@ -231,9 +231,9 @@ class GraphReconstructionModel(nn.Module):
         self.embedding = feature_embedding
         self.core_model = subgraph_model
 
-    def forward(self, x, t):
+    def forward(self, x, t, mask=None):
         x = self.embedding(x)
-        out = self.core_model(x, t)
+        out = self.core_model(x, t, mask=mask)
         assert out.shape[1] == 1
         return out.squeeze(dim=1)
 
