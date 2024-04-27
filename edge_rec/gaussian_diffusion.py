@@ -656,6 +656,7 @@ class Trainer(object):
                             val_sample = self.ema.ema_model.sample(eval_data)
                             print(f"Validation Loss: {val_loss.item()}")
                             np.save(f"{self.results_folder}/sample-{self.step}.npy", val_sample[:,0,:,:].cpu().detach().numpy())
+                            self.save(self.step)
                             
 
                 pbar.update(1)
