@@ -1,34 +1,25 @@
 import math
-import copy
 from pathlib import Path
-from random import random
 from functools import partial
 from collections import namedtuple
 from multiprocessing import cpu_count
-import numpy as np
 
 import numpy as np
 import torch
-import pickle as pkl
-from torch import nn, einsum
+from torch import nn
 from torch.cuda.amp import autocast
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 
 from torch.optim import Adam
 
-from torchvision import transforms as T, utils
-
-from einops import rearrange, reduce, repeat
-from einops.layers.torch import Rearrange
-
-from PIL import Image
+from einops import rearrange, reduce
 from tqdm.auto import tqdm
 from ema_pytorch import EMA
 
 from accelerate import Accelerator
 
-from edge_rec.movie_lens_dataset import ProcessedMovieLens, RatingQuantileTransform, rating_transform
+from edge_rec.movie_lens_dataset import ProcessedMovieLens, rating_transform
 
 ModelPrediction = namedtuple('ModelPrediction', ['pred_noise', 'pred_x_start'])
 
@@ -76,16 +67,6 @@ def num_to_groups(num, divisor):
     if remainder > 0:
         arr.append(remainder)
     return arr
-
-
-# normalization functions
-
-def normalize_to_neg_one_to_one(img):
-    return img * 2 - 1
-
-
-def unnormalize_to_zero_to_one(t):
-    return (t + 1) * 0.5
 
 
 def extract(a, t, x_shape):
@@ -145,7 +126,6 @@ class GaussianDiffusion(nn.Module):
             beta_schedule='cosine',
             schedule_fn_kwargs=dict(),
             ddim_sampling_eta=0.,
-            auto_normalize=True,
             offset_noise_strength=0.,  # https://www.crosslabs.org/blog/diffusion-with-offset-noise
             min_snr_loss_weight=False,  # https://arxiv.org/abs/2303.09556
             min_snr_gamma=5
@@ -245,11 +225,6 @@ class GaussianDiffusion(nn.Module):
             register_buffer('loss_weight', maybe_clipped_snr)
         elif objective == 'pred_v':
             register_buffer('loss_weight', maybe_clipped_snr / (snr + 1))
-
-        # auto-normalization of data [0, 1] -> [-1, 1] - can turn off by setting it to be False
-
-        self.normalize = normalize_to_neg_one_to_one if auto_normalize else identity
-        self.unnormalize = unnormalize_to_zero_to_one if auto_normalize else identity
 
     @property
     def device(self):
@@ -353,10 +328,7 @@ class GaussianDiffusion(nn.Module):
             img, _ = self.p_sample(img, t, self_cond=None)
             imgs.append(img)
 
-        ret = img if not return_all_timesteps else torch.stack(imgs, dim=1)
-
-        ret = self.unnormalize(ret)
-        return ret
+        return img if not return_all_timesteps else torch.stack(imgs, dim=1)
 
     @torch.inference_mode()
     def ddim_sample(self, x_start, return_all_timesteps=False):
@@ -395,10 +367,7 @@ class GaussianDiffusion(nn.Module):
 
             imgs.append(img)
 
-        ret = img if not return_all_timesteps else torch.stack(imgs, dim=1)
-
-        ret = self.unnormalize(ret)
-        return ret
+        return img if not return_all_timesteps else torch.stack(imgs, dim=1)
 
     @torch.inference_mode()
     def sample(self, x_start, return_all_timesteps=False):
