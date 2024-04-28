@@ -699,7 +699,7 @@ class Trainer(object):
                             if self.full_sample:
                                 pred_graph = self.eval()
                                 print(pred_graph.shape)
-                                
+
                             else:
                                 eval_data = next(self.dl).to(device)
                                 edge_mask = eval_data[:, -1, :, :].bool()
@@ -736,14 +736,16 @@ class Trainer(object):
         return sampled_graph
 
     def get_metrics(self, predicted_graph, top_ks=(1, 5, 10, 20, 30, 40, 50)):
+        unmasked_pred_graph = predicted_graph.cpu().detach()
+        pred_graph = unmasked_pred_graph.clone()
+
         train_edges = self.ds.processed_ratings
-        pred_graph = predicted_graph.cpu().detach()
         pred_graph[train_edges[0], train_edges[1]] = float('-inf')
         ranked = torch.argsort(pred_graph, dim=1, descending=True)
 
         test_edges = self.ds.test_ratings
         test_graph = torch.zeros_like(pred_graph)
-        test_graph[test_edges[0], test_edges[1]] = test_edges[2]
+        test_graph[test_edges[0], test_edges[1]] = test_edges[2].float()
 
         precision = torch.zeros(len(top_ks))
         recall = torch.zeros_like(precision)
@@ -757,16 +759,18 @@ class Trainer(object):
             test_ratings = test_edges[2][test_edges[0] == user].argsort(descending=True)
             true_rankings = test_movies[test_ratings]
 
+            assert len(true_rankings) > 0, f"failed for user {user}"
+
             for i, k in enumerate(top_ks):
                 isin = torch.isin(pred_rankings[:k], true_rankings)
                 hits = torch.sum(isin)
                 precision[i] += hits / k
                 recall[i] += hits / true_rankings.shape[0]
-                mean_reciprocal_rank[i] += 1 / (torch.where(isin)[0][0] + 1)
+                mean_reciprocal_rank[i] += 1 / (torch.argsort(isin.long(), descending=True, stable=True)[0] + 1)
                 hit_rate[i] += 1 if hits > 0 else 0
 
         for i, k in enumerate(top_ks):
-            ndcg[i] = ndcg_score(test_graph, pred_graph, k=k)
+            ndcg[i] = ndcg_score(test_graph, unmasked_pred_graph, k=k)
 
         metrics = {
             'precision': precision / predicted_graph.shape[0],
