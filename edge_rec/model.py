@@ -37,6 +37,14 @@ def toi(x):
     return x.long()
 
 
+def assert_in(low, high):
+    def _check(x: torch.Tensor):
+        assert torch.all((low <= x) & (x < high))
+        return x
+
+    return _check
+
+
 def keep(*indices, strict=True):
     def _filter(*args):
         l = len(args)
@@ -80,24 +88,29 @@ def get_kwargs(kwargs, **defaults):
 class MovieLensFeatureEmb(nn.Module):
     MAX_N_GENRES = 6
 
+    N_AGE_VALUES = 6
+    N_GENDER_VALUES = 2
+    N_OCCUPATION_VALUES = 21
+    N_GENRE_VALUES = 19
+
     def __init__(self, age_dim=4, gender_dim=4, occupation_dim=8, genre_dim=16, add_genres=True):
         # NB: embed_dim should be even
         super().__init__()
 
         self.age_embedding = nn.Embedding(
-            num_embeddings=6,
+            num_embeddings=self.N_AGE_VALUES,
             embedding_dim=age_dim
         )
         self.gender_embedding = nn.Embedding(
-            num_embeddings=2,
+            num_embeddings=self.N_GENDER_VALUES,
             embedding_dim=gender_dim
         )
         self.occupation_embedding = nn.Embedding(
-            num_embeddings=21,
+            num_embeddings=self.N_OCCUPATION_VALUES,
             embedding_dim=occupation_dim
         )
         self.genre_embedding = nn.Embedding(
-            num_embeddings=19,
+            num_embeddings=self.N_GENRE_VALUES,
             embedding_dim=genre_dim
         )
 
@@ -127,10 +140,14 @@ class MovieLensFeatureEmb(nn.Module):
             collapse_genres = idx('b f n m e -> b (f e) n m')
 
         rating_embeds = x[:, 0:1]
-        genre_embeds = pipe(x[:, 1:7]) | toi | self.genre_embedding | collapse_genres | pipe.extract
-        age_embeds = pipe(x[:, 7]) | toi | self.age_embedding | idx('b n m e -> b e n m') | pipe.extract
-        gender_embeds = pipe(x[:, 8]) | toi | self.gender_embedding | idx('b n m e -> b e n m') | pipe.extract
-        occupation_embeds = pipe(x[:, 9]) | toi | self.occupation_embedding | idx('b n m e -> b e n m') | pipe.extract
+        genre_embeds = pipe(x[:, 1:7]) | toi | assert_in(0, self.N_GENRE_VALUES) \
+                       | self.genre_embedding | collapse_genres | pipe.extract
+        age_embeds = pipe(x[:, 7]) | toi | assert_in(0, self.N_AGE_VALUES) \
+                     | self.age_embedding | idx('b n m e -> b e n m') | pipe.extract
+        gender_embeds = pipe(x[:, 8]) | toi | assert_in(0, self.N_GENDER_VALUES) \
+                        | self.gender_embedding | idx('b n m e -> b e n m') | pipe.extract
+        occupation_embeds = pipe(x[:, 9]) | toi | assert_in(0, self.N_OCCUPATION_VALUES) \
+                            | self.occupation_embedding | idx('b n m e -> b e n m') | pipe.extract
 
         full_embeds = torch.cat([rating_embeds, genre_embeds, age_embeds, gender_embeds, occupation_embeds], dim=1)
         assert full_embeds.shape[1] == self.embed_dim

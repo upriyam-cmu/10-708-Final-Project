@@ -471,7 +471,7 @@ class GaussianDiffusion(nn.Module):
             target = v
         else:
             raise ValueError(f'unknown objective {self.objective}')
-        
+
         if edge_mask is not None:
             target[~edge_mask] = 0
 
@@ -543,7 +543,7 @@ class Trainer(object):
         self.image_size = diffusion_model.image_size
 
         self.max_grad_norm = max_grad_norm
-        
+
         download = not Path(folder + "/processed/data.pt").exists()
         # dataset and dataloader
         self.ds = ProcessedMovieLens(folder, n_subsamples, n_unique_per_sample=self.image_size[0],
@@ -627,9 +627,9 @@ class Trainer(object):
 
                 for _ in range(self.gradient_accumulate_every):
                     data = next(self.dl).to(device)
-                    edge_mask = data[:,-1,:,:].bool()
-                    data = data[:,:-1,:,:]
-                    
+                    edge_mask = data[:, -1, :, :].bool()
+                    data = data[:, :-1, :, :]
+
                     with self.accelerator.autocast():
                         loss = self.model(data, edge_mask)
                         loss = loss / self.gradient_accumulate_every
@@ -656,9 +656,9 @@ class Trainer(object):
 
                         with torch.inference_mode():
                             eval_data = next(self.dl).to(device)
-                            edge_mask = eval_data[:,-1,:,:].bool()
-                            eval_data = eval_data[:,:-1,:,:]
-                            
+                            edge_mask = eval_data[:, -1, :, :].bool()
+                            eval_data = eval_data[:, :-1, :, :]
+
                             b, c, h, w = eval_data.shape
                             random_rating = torch.randn(b, h, w)
                             eval_data[:, 0, :, :] = random_rating
