@@ -719,7 +719,7 @@ class Trainer(object):
             true_rankings = test_movies[test_ratings]
             
             for i, k in enumerate(top_ks):
-                isin = torch.isin(pred_rankings[:, :k], true_rankings)
+                isin = torch.isin(pred_rankings[:k], true_rankings)
                 hits = torch.sum(isin)
                 precision[i] += hits / k
                 recall[i] += hits / true_rankings.shape[0]
@@ -727,8 +727,8 @@ class Trainer(object):
                 hit_rate[i] += 1 if hits > 0 else 0
             
         metrics = {
-            'avg_precision': precision / predicted_graph.shape[0],
-            'avg_recall': recall / predicted_graph.shape[0],
+            'precision': precision / predicted_graph.shape[0],
+            'recall': recall / predicted_graph.shape[0],
             'mean_reciprocal_rank': mean_reciprocal_rank / predicted_graph.shape[0],
             'hit_rate': hit_rate / predicted_graph.shape[0]
         }
