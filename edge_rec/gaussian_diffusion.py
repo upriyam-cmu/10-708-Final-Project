@@ -22,7 +22,7 @@ from ema_pytorch import EMA
 
 from accelerate import Accelerator
 
-from edge_rec.movie_lens_dataset import ProcessedMovieLens, rating_transform
+from edge_rec.movie_lens_dataset import ProcessedMovieLens
 
 ModelPrediction = namedtuple('ModelPrediction', ['pred_noise', 'pred_x_start'])
 
@@ -588,8 +588,7 @@ class Trainer(object):
 
         download = not Path(folder + "/processed/data.pt").exists()
         # dataset and dataloader
-        self.ds = ProcessedMovieLens(folder, n_subsamples, n_unique_per_sample=self.image_size[0],
-                                     dataset_transform=rating_transform, download=download)
+        self.ds = ProcessedMovieLens(folder, n_subsamples, n_unique_per_sample=self.image_size[0], download=download)
 
         dl = DataLoader(self.ds, batch_size=train_batch_size, shuffle=True, pin_memory=True, num_workers=cpu_count())
 

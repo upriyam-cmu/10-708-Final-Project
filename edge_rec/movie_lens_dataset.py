@@ -220,8 +220,7 @@ class RatingQuantileTransform(object):
 class ProcessedMovieLens(Dataset):
     PROCESSED_ML_SUBPATH = "/processed/data.pt"
 
-    def __init__(self, root, ml_100k=True, n_subsamples=10000, n_unique_per_sample=10, dataset_transform=None,
-                 transform=None, test_split=0.1,
+    def __init__(self, root, ml_100k=True, n_subsamples=10000, n_unique_per_sample=10, transform=None, test_split=0.1,
                  download=True):
         dataset_class = RawMovieLens100K if ml_100k else RawMovieLens1M
 
@@ -232,7 +231,6 @@ class ProcessedMovieLens(Dataset):
         self.n_unique_per_sample = n_unique_per_sample
         self.n_subsamples = n_subsamples
         self.transform = transform
-        self.dataset_transform = dataset_transform
         print(root + self.PROCESSED_ML_SUBPATH)
         self.processed_data = torch.load(root + self.PROCESSED_ML_SUBPATH)
         self.ratings = self._preprocess_ratings(self.processed_data)
@@ -242,7 +240,7 @@ class ProcessedMovieLens(Dataset):
         train_rating_idxs = []
         test_rating_idxs = []
         
-        users = self.raw.data['user']['x'].shape[0]
+        users = self.processed_data[0]['user']['x'].shape[0]
         for i in range(users):
             rating_idxs = torch.where(ratings[0, :] == i)[0]
             if rand:
