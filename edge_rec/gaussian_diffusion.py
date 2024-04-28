@@ -318,37 +318,51 @@ class GaussianDiffusion(nn.Module):
 
     def _subsample_img(self, img, sample_full_params):
         if sample_full_params is None:
-            yield img, None
+            n_groups = 1
+
+            def _subsample():
+                yield img, None
         else:
             b, f, h, w = img.shape
             assert b == 1
             max_batch_size, *all_subgraph_sizes = sample_full_params
+
+            def _get_block_inds(dim_size, block_size):
+                assert dim_size >= block_size
+                inds = np.empty(((dim_size - 1) // block_size + 1) * block_size, dtype=int)
+                inds[:dim_size] = np.random.permutation(dim_size)
+                inds[dim_size:] = inds[:len(inds) - dim_size]
+                return np.split(inds, range(block_size, dim_size, block_size))
+
+            n_groups = 0
+            iters = []
+
             for subgraph_sizes in all_subgraph_sizes:
                 n, m = (subgraph_sizes, subgraph_sizes) if isinstance(subgraph_sizes, int) else subgraph_sizes
 
-                def _get_block_inds(dim_size, block_size):
-                    assert dim_size >= block_size
-                    inds = np.empty((dim_size - 1) // block_size + 1)
-                    inds[:dim_size] = np.random.permutation(dim_size)
-                    inds[dim_size:] = inds[:len(inds) - dim_size]
-                    return np.split(inds, range(block_size, dim_size, block_size))
+                h_blocks, w_blocks = _get_block_inds(h, n), _get_block_inds(w, m)
+                n_groups += (len(h_blocks) * len(w_blocks) - 1) // max_batch_size + 1
+                iters.append(iter(product(h_blocks, w_blocks)))
 
-                split_iter = iter(product(_get_block_inds(h, n), _get_block_inds(w, m)))
-                while True:
-                    sample_inds = []
-                    try:
-                        for _ in range(max_batch_size):
-                            sample_inds.append(next(split_iter))
-                    except StopIteration:
-                        pass
-                    if len(sample_inds) > 0:
-                        data = torch.empty(len(sample_inds), f, n, m, dtype=img.dtype, device=img.device)
-                        for i, (h_inds, w_inds) in enumerate(sample_inds):
-                            data[i, :, :, :] = img[0, :, h_inds, w_inds]
-                        yield data, sample_inds
-                    if len(sample_inds) < max_batch_size:
-                        # end of samples
-                        break
+            def _subsample():
+                for split_iter in iters:
+                    while True:
+                        sample_inds = []
+                        try:
+                            for _ in range(max_batch_size):
+                                sample_inds.append(next(split_iter))
+                        except StopIteration:
+                            pass
+                        if len(sample_inds) > 0:
+                            sample_inds = [np.meshgrid(*inds, indexing='ij') for inds in sample_inds]
+                            data = torch.empty(len(sample_inds), f, n, m, dtype=img.dtype, device=img.device)
+                            for i, (h_inds, w_inds) in enumerate(sample_inds):
+                                data[i, :, :, :] = img[0, :, h_inds, w_inds]
+                            yield data, sample_inds
+                        if len(sample_inds) < max_batch_size:
+                            # end of samples
+                            break
+        return _subsample, n_groups
 
     @torch.inference_mode()
     def p_sample_loop(self, x_start, return_all_timesteps=False, sample_full_params=None):
@@ -356,7 +370,8 @@ class GaussianDiffusion(nn.Module):
         imgs = [img]
 
         for t in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step', total=self.num_timesteps):
-            for sub_img, ind_map in self._subsample_img(img, sample_full_params):
+            subsampler, n_subsamples = self._subsample_img(img, sample_full_params)
+            for sub_img, ind_map in tqdm(subsampler(), desc='subsampling loop', total=n_subsamples):
                 new_img, _ = self.p_sample(sub_img, t, self_cond=None)
                 if ind_map is None:
                     new_img[:, 1:, :, :] = sub_img[:, 1:, :, :]
@@ -395,7 +410,9 @@ class GaussianDiffusion(nn.Module):
             sigma = eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
             c = (1 - alpha_next - sigma ** 2).sqrt()
             scaled_x_start = x_start * alpha_next.sqrt()
-            for sub_img, ind_map in self._subsample_img(img, sample_full_params):
+
+            subsampler, n_subsamples = self._subsample_img(img, sample_full_params)
+            for sub_img, ind_map in tqdm(subsampler(), desc='subsampling loop', total=n_subsamples):
                 pred_noise, _, *_ = self.model_predictions(
                     sub_img, time_cond,
                     clip_x_start=True, rederive_pred_noise=True
@@ -690,7 +707,7 @@ class Trainer(object):
                             val_sample = self.ema.ema_model.sample(eval_data)
                             print(f"Validation Loss: {val_loss.item()}")
                             np.save(
-                                f"{self.results_folder}/sample-{self.step}.npy",
+                                str(self.results_folder / f"sample-{self.step}.npy"),
                                 val_sample[:, 0, :, :].cpu().detach().numpy()
                             )
                             self.save(self.step)
@@ -698,3 +715,14 @@ class Trainer(object):
                 pbar.update(1)
 
         accelerator.print('training complete')
+
+    def eval(self, milestone, batch_size=16, subgraph_size=(100, 100)):
+        self.load(milestone)
+        full_graph = self.ds.from_edges()[:-1]
+        full_graph[0, :] = torch.randn_like(full_graph[0])
+        full_graph = full_graph.unsqueeze(dim=0).to(self.device)
+        sampled_graph = self.ema.ema_model.sample_full(full_graph, batch_size, subgraph_size)
+        np.save(
+            str(self.results_folder / f"full-graph-sample-{milestone}.npy"),
+            sampled_graph[0, 0, :, :].cpu().detach().numpy()
+        )
