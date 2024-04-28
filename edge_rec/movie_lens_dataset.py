@@ -126,16 +126,14 @@ class RatingQuantileTransform(object):
 
 class ProcessedMovieLens(Dataset):
     PROCESSED_ML_SUBPATH = "/processed/data.pt"
-    TEST_SPLIT = 0
 
-    def __init__(self, root, n_subsamples=10000, n_unique_per_sample=10, test=False, dataset_transform=None,
+    def __init__(self, root, n_subsamples=10000, n_unique_per_sample=10, dataset_transform=None,
                  transform=None, test_split=0.1,
                  download=True):
         if download:
             self.ml_1m = RawMovieLens1M(root, force_reload=True)
             self.ml_1m.process()
 
-        self.test = test
         self.n_unique_per_sample = n_unique_per_sample
         self.n_subsamples = n_subsamples
         self.transform = transform
@@ -167,16 +165,7 @@ class ProcessedMovieLens(Dataset):
     def _preprocess_ratings(self, data):
         edges = data[0][('user', 'rates', 'movie')]
         edge_ratings = torch.concatenate([edges["edge_index"], edges["rating"].reshape((1, -1))])
-
-        _, m = edge_ratings.shape
-        test_size = int(self.TEST_SPLIT * m)
-        edge_indices = np.arange(m)
-
-        np.random.seed(42)
-        test_indices = np.random.choice(edge_indices, (test_size,), replace=False).astype(int)
-        train_indices = edge_indices[~np.isin(edge_indices, test_indices)]
-
-        return edge_ratings[:, test_indices] if self.test else edge_ratings[:, train_indices]
+        return edge_ratings
 
     def from_edges(self, indices=None):
         edge_ratings = self.processed_ratings
