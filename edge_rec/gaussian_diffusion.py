@@ -698,3 +698,39 @@ class Trainer(object):
                 pbar.update(1)
 
         accelerator.print('training complete')
+        
+
+    def get_metrics(self, predicted_graph, top_ks = [1, 5, 10, 20, 30, 40, 50]):
+        train_edges = self.ds.processed_ratings[:2]
+        test_edges = self.ds.test_ratings[:2]
+        
+        predicted_graph[train_edges[0], train_edges[1]] = float('-inf')
+        ranked = torch.argsort(predicted_graph, dim=1, descending=True)
+        
+        precision = torch.zeros(len(top_ks), device=self.device)
+        recall = torch.zeros(len(top_ks), device=self.device)
+        mean_reciprocal_rank = torch.zeros(len(top_ks), device=self.device)
+        hit_rate = torch.zeros(len(top_ks), device=self.device)
+        
+        for user in range(predicted_graph.shape[0]):
+            pred_rankings = ranked[user]
+            test_movies = test_edges[1][test_edges[0] == user]
+            test_ratings = test_edges[2][test_edges[0] == user].argsort(descending=True)
+            true_rankings = test_movies[test_ratings]
+            
+            for i, k in enumerate(top_ks):
+                isin = torch.isin(pred_rankings[:, :k], true_rankings)
+                hits = torch.sum(isin)
+                precision[i] += hits / k
+                recall[i] += hits / true_rankings.shape[0]
+                mean_reciprocal_rank[i] += 1 / (torch.where(isin)[0][0] + 1)
+                hit_rate[i] += 1 if hits > 0 else 0
+            
+        metrics = {
+            'avg_precision': precision / predicted_graph.shape[0],
+            'avg_recall': recall / predicted_graph.shape[0],
+            'mean_reciprocal_rank': mean_reciprocal_rank / predicted_graph.shape[0],
+            'hit_rate': hit_rate / predicted_graph.shape[0]
+        }
+
+        return metrics
