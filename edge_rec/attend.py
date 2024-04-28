@@ -94,6 +94,8 @@ class Attend(nn.Module):
             q = q * (self.scale / default_scale)
 
         q, k, v = map(lambda t: t.contiguous(), (q, k, v))
+        if exists(m):
+            m = m.contiguous()
 
         # Check if there is a compatible device for flash attention
 
@@ -159,6 +161,7 @@ class Attention(nn.Module):
 
         self.attend = Attend(flash=flash)
 
+        self.mem_mask = nn.Parameter(torch.ones(1, 1, num_mem_kv).bool(), requires_grad=False)
         self.mem_kv = nn.Parameter(torch.randn(2, heads, num_mem_kv, dim_head))
         self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, 1, bias=False)
         self.to_out = nn.Conv2d(hidden_dim, dim, 1)
@@ -169,7 +172,9 @@ class Attention(nn.Module):
         qkv = self.to_qkv(x).chunk(3, dim=1)
         q, k, v = map(lambda t: rearrange(t, 'b (h c) x y -> (b y) h x c', h=self.heads), qkv)
         if exists(m):
-            m = rearrange(m, 'b x y -> (b y) 1 x 1')
+            mem_mask = repeat(self.mem_mask, 'h n d -> b h n d', b=b * w)
+            m = rearrange(m, 'b x y -> (b y) 1 1 x')
+            m = torch.cat((mem_mask, m), dim=-1)
 
         mk, mv = map(lambda t: repeat(t, 'h n d -> b h n d', b=b * w), self.mem_kv)
         k, v = map(partial(torch.cat, dim=-2), ((mk, k), (mv, v)))
