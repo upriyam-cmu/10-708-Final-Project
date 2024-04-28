@@ -3,7 +3,6 @@ import numpy as np
 import pandas as pd
 from torch.utils.data import Dataset
 from torch_geometric.datasets import MovieLens1M, MovieLens100K
-from sklearn.preprocessing import QuantileTransformer
 
 from torch_geometric.data import HeteroData
 
@@ -37,7 +36,7 @@ class RawMovieLens100K(MovieLens100K):
         )
         movie_mapping = {idx: i for i, idx in enumerate(df.index)}
 
-        x = df[MOVIE_HEADERS[6:]].values
+        x = df[self.MOVIE_HEADERS[6:]].values
         data['movie'].x = torch.from_numpy(x).to(torch.float)
 
         self.df = df
@@ -205,16 +204,6 @@ class RawMovieLens1M(MovieLens1M):
             data = self.pre_transform(data)
 
         self.save([data], self.processed_paths[0])
-
-
-class RatingQuantileTransform(object):
-    def __init__(self):
-        self.qt_transformer = QuantileTransformer(n_quantiles=5, output_distribution="normal")
-
-    def __call__(self, data):
-        ratings = data[2, :]
-        data[2, :] = torch.Tensor(self.qt_transformer.fit_transform(ratings.reshape(-1, 1))).T
-        return data
 
 
 class ProcessedMovieLens(Dataset):
