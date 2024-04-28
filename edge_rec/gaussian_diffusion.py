@@ -371,9 +371,9 @@ class GaussianDiffusion(nn.Module):
         img = x_start
         imgs = [img]
 
-        for t in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step', total=self.num_timesteps):
+        for t in reversed(range(0, self.num_timesteps)):
             subsampler, n_subsamples = self._subsample_img(img, sample_full_params)
-            for sub_img, ind_map in tqdm(subsampler(), desc='subsampling loop', total=n_subsamples):
+            for sub_img, ind_map in subsampler():
                 new_img, _ = self.p_sample(sub_img, t, self_cond=None)
                 if ind_map is None:
                     new_img[:, 1:, :, :] = sub_img[:, 1:, :, :]
@@ -594,6 +594,14 @@ class Trainer(object):
 
         dl = self.accelerator.prepare(dl)
         self.dl = cycle(dl)
+        
+        # test dataset and dataloader
+        self.test_ds = ProcessedMovieLens(folder, n_subsamples, n_unique_per_sample=self.image_size[0], download=download, train=False)
+        
+        test_dl = DataLoader(self.test_ds, batch_size=train_batch_size, shuffle=True, pin_memory=True, num_workers=cpu_count())
+        
+        test_dl = self.accelerator.prepare(test_dl)
+        self.test_dl = cycle(test_dl)
 
         # optimizer
 
@@ -696,27 +704,22 @@ class Trainer(object):
                         self.ema.ema_model.eval()
 
                         with torch.inference_mode():
-                            if self.full_sample:
-                                pred_graph = self.eval()
-                                print(pred_graph.shape)
+                            eval_data = next(self.test_dl).to(device)
+                            edge_mask = eval_data[:, -1, :, :].bool()
+                            eval_data = eval_data[:, :-1, :, :]
 
-                            else:
-                                eval_data = next(self.dl).to(device)
-                                edge_mask = eval_data[:, -1, :, :].bool()
-                                eval_data = eval_data[:, :-1, :, :]
+                            b, c, h, w = eval_data.shape
+                            random_rating = torch.randn(b, h, w)
+                            eval_data[:, 0, :, :] = random_rating
 
-                                b, c, h, w = eval_data.shape
-                                random_rating = torch.randn(b, h, w)
-                                eval_data[:, 0, :, :] = random_rating
-
-                                val_loss = self.model(eval_data, edge_mask)
-                                val_sample = self.ema.ema_model.sample(eval_data)
-                                print(f"Validation Loss: {val_loss.item()}")
-                                np.save(
-                                    str(self.results_folder / f"sample-{self.step}.npy"),
-                                    val_sample[:, 0, :, :].cpu().detach().numpy()
-                                )
-                                self.save(self.step)
+                            val_loss = self.model(eval_data, edge_mask)
+                            val_sample = self.ema.ema_model.sample(eval_data)
+                            print(f"Validation Loss: {val_loss.item()}")
+                            np.save(
+                                str(self.results_folder / f"sample-{self.step}.npy"),
+                                val_sample[:, 0, :, :].cpu().detach().numpy()
+                            )
+                            self.save(self.step)
 
                 pbar.update(1)
 

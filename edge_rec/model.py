@@ -300,7 +300,7 @@ class GraphReconstructionModel(nn.Module):
         return GraphReconstructionModel(
             embed,
             SubgraphAttnModel(
-                embed.embed_dim, [],
+                embed.embed_dim, [32, 32, 16],
                 SinusoidalPosEmb(embed.embed_dim + embed.embed_dim % 2)
             )
         )
