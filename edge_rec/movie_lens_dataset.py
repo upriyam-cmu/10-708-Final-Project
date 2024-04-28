@@ -22,8 +22,9 @@ RATING_HEADERS = ['userId', 'movieId', 'rating', 'timestamp']
 
 
 def rating_transform(data):
-    ratings = data[2, :]
-    data[2, :] = 2*(ratings - 3)/5
+    data = data.float()
+    ratings = data[0, :, :]
+    data[0, :, :] = 2*(ratings - 3)/5
     return data
 
 
@@ -152,47 +153,20 @@ class ProcessedMovieLens(Dataset):
     def _preprocess_ratings(self, data):
         edges = data[0][('user', 'rates', 'movie')]
         edge_ratings = torch.concatenate([edges["edge_index"], edges["rating"].reshape((1, -1))])
-        return self.dataset_transform(edge_ratings)
-
-    def __getitem__(self, idx):
-        n_unique = self.n_unique_per_sample
+        return edge_ratings
+    
+    def from_edges(self, indices=None):
         edge_ratings = self.processed_ratings
         movie_feats, user_feats = self.processed_data[0]["movie"]["x"], self.processed_data[0]["user"]["x"]
+        
+        _ , m = edge_ratings.shape
 
-        _, edge_size = edge_ratings.shape
+        if indices is None: #if indices is not passed, take the whole graph
+            indices = np.arange(m)
 
-        indices = np.random.choice(np.arange(edge_size), size=(n_unique,), replace=False)
+        xs, ys = self.get_unique_users(indices), self.get_unique_movies(indices)
 
-        xs = edge_ratings[0, indices].unique()
-        ys = edge_ratings[1, indices].unique()
-
-        unique_xs, unique_ys = len(xs.unique()), len(ys.unique())
-        users_missing, movies_missing = n_unique - unique_xs, n_unique - unique_ys
-
-        while users_missing > 0:
-            candidate_users = \
-            np.where(~np.isin(edge_ratings[0, :], xs.unique()) & np.isin(edge_ratings[1, :], ys.unique()))[0]
-            n_candidates = len(candidate_users)
-            new_indices = np.random.choice(candidate_users, size=(min(users_missing, n_candidates),), replace=False)
-            indices = np.concatenate([indices, new_indices])
-            xs = edge_ratings[0, indices].unique()
-            users_missing = n_unique - len(xs)
-
-        while movies_missing > 0:
-            candidate_movies = \
-            np.where(np.isin(edge_ratings[0, :], xs.unique()) & ~np.isin(edge_ratings[1, :], ys.unique()))[0]
-            n_candidates = len(candidate_movies)
-            new_indices = np.random.choice(candidate_movies, size=(min(movies_missing, n_candidates),), replace=False)
-            indices = np.concatenate([indices, new_indices])
-            ys = edge_ratings[1, indices].unique()
-            movies_missing = n_unique - len(ys)
-
-        xs = edge_ratings[0, indices].unique()
-        ys = edge_ratings[1, indices].unique()
-
-        indices_xs = torch.where(torch.isin(edge_ratings[0, :], xs))[0]
-        indices_ys = torch.where(torch.isin(edge_ratings[1, :], ys))[0]
-        subsample_edges = edge_ratings[:, np.intersect1d(indices_xs, indices_ys)].T
+        subsample_edges = edge_ratings[:, indices].T
 
         subsample_movie_feats = movie_feats[subsample_edges[:, 1], :]
         subsample_user_feats = user_feats[subsample_edges[:, 0], :]
@@ -200,12 +174,12 @@ class ProcessedMovieLens(Dataset):
 
         broadcasted_movie_feats, broadcasted_user_feats = (
             torch.broadcast_to(
-                movie_feats[ys.sort().values, :].T.reshape((-1, 1, n_unique)).swapaxes(1, 2),
-                (-1, n_unique, n_unique)
+                movie_feats[ys.sort().values, :].T.reshape((-1, 1, len(ys))).swapaxes(1, 2),
+                (-1, len(ys), len(xs))
             ).swapaxes(1, 2),
             torch.broadcast_to(
-                user_feats[xs.sort().values, :].T.reshape((-1, 1, n_unique)).swapaxes(1, 2),
-                (-1, n_unique, n_unique)
+                user_feats[xs.sort().values, :].T.reshape((-1, 1, len(xs))).swapaxes(1, 2),
+                (-1, len(xs), len(ys))
             )
         )
 
@@ -217,10 +191,10 @@ class ProcessedMovieLens(Dataset):
         )
 
         edge_mask = (rating_matrix != -10)
-        rating_matrix[~edge_mask] = 0
+        rating_matrix[~edge_mask] = 3
 
         item = torch.cat([
-            rating_matrix.reshape((1, n_unique, n_unique)),
+            rating_matrix.reshape((1, len(xs), len(ys))),
             broadcasted_movie_feats,
             broadcasted_user_feats
         ], dim=0)
@@ -229,6 +203,67 @@ class ProcessedMovieLens(Dataset):
             item,
             edge_mask[None, :, :]
         ], dim=0)
+
+        out = self.dataset_transform(out)
+
+        return out
+    
+    def get_unique_users(self, indices=None):
+        edge_ratings = self.processed_ratings
+        _, m = edge_ratings.shape
+        if indices is None:
+            indices = np.arange(m)
+        return edge_ratings[0, indices].unique()
+    
+    def get_unique_movies(self, indices=None):
+        edge_ratings = self.processed_ratings
+        _, m = edge_ratings.shape
+        if indices is None:
+            indices = np.arange(m)
+        return edge_ratings[1, indices].unique()
+
+
+    def __getitem__(self, idx):
+        n_unique = self.n_unique_per_sample
+        edge_ratings = self.processed_ratings
+        movie_feats, user_feats = self.processed_data[0]["movie"]["x"], self.processed_data[0]["user"]["x"]
+
+        _, edge_size = edge_ratings.shape
+
+        indices = np.random.choice(np.arange(edge_size), size=(n_unique,), replace=False)
+
+        xs, ys = self.get_unique_users(indices), self.get_unique_movies(indices)
+
+        unique_xs, unique_ys = len(xs), len(ys)
+        users_missing, movies_missing = n_unique - unique_xs, n_unique - unique_ys
+
+        while users_missing > 0:
+            candidate_users = np.where(
+                ~np.isin(edge_ratings[0, :], xs.unique()) & np.isin(edge_ratings[1, :], ys.unique())
+            )[0]
+            n_candidates = len(candidate_users)
+            new_indices = np.random.choice(candidate_users, size=(min(users_missing, n_candidates),), replace=False)
+            indices = np.concatenate([indices, new_indices])
+            xs = edge_ratings[0, indices].unique()
+            users_missing = n_unique - len(xs)
+
+        while movies_missing > 0:
+            candidate_movies = np.where(
+                np.isin(edge_ratings[0, :], xs.unique()) & ~np.isin(edge_ratings[1, :], ys.unique())
+            )[0]
+            n_candidates = len(candidate_movies)
+            new_indices = np.random.choice(candidate_movies, size=(min(movies_missing, n_candidates),), replace=False)
+            indices = np.concatenate([indices, new_indices])
+            ys = edge_ratings[1, indices].unique()
+            movies_missing = n_unique - len(ys)
+
+        xs, ys = self.get_unique_users(indices), self.get_unique_movies(indices)
+
+        indices_xs = torch.where(torch.isin(edge_ratings[0, :], xs))[0]
+        indices_ys = torch.where(torch.isin(edge_ratings[1, :], ys))[0]
+        edge_subsample_indices = np.intersect1d(indices_xs, indices_ys)
+
+        out = self.from_edges(edge_subsample_indices)
 
         return out
 
