@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 from torch.utils.data import Dataset
 from torch_geometric.datasets import MovieLens1M, MovieLens100K
+from sklearn.preprocessing import QuantileTransformer
 
 from torch_geometric.data import HeteroData
 
@@ -36,7 +37,7 @@ class RawMovieLens100K(MovieLens100K):
         )
         movie_mapping = {idx: i for i, idx in enumerate(df.index)}
 
-        x = df[self.MOVIE_HEADERS[6:]].values
+        x = df[MOVIE_HEADERS[6:]].values
         data['movie'].x = torch.from_numpy(x).to(torch.float)
 
         self.df = df
@@ -206,10 +207,20 @@ class RawMovieLens1M(MovieLens1M):
         self.save([data], self.processed_paths[0])
 
 
+class RatingQuantileTransform(object):
+    def __init__(self):
+        self.qt_transformer = QuantileTransformer(n_quantiles=5, output_distribution="normal")
+
+    def __call__(self, data):
+        ratings = data[2, :]
+        data[2, :] = torch.Tensor(self.qt_transformer.fit_transform(ratings.reshape(-1, 1))).T
+        return data
+
+
 class ProcessedMovieLens(Dataset):
     PROCESSED_ML_SUBPATH = "/processed/data.pt"
 
-    def __init__(self, root, ml_100k=True, n_subsamples=10000, n_unique_per_sample=10, transform=None, test=True, test_split=0.1,
+    def __init__(self, root, ml_100k=True, n_subsamples=10000, n_unique_per_sample=10, transform=None, test_split=0.1,
                  download=True):
         dataset_class = RawMovieLens100K if ml_100k else RawMovieLens1M
 
@@ -224,7 +235,7 @@ class ProcessedMovieLens(Dataset):
         print(root + self.PROCESSED_ML_SUBPATH)
         self.processed_data = torch.load(root + self.PROCESSED_ML_SUBPATH)
         self.ratings = self._preprocess_ratings(self.processed_data)
-        self.processed_ratings = self._split_ratings(self.ratings, test_split)
+        self.processed_ratings, self.test_ratings = self._split_ratings(self.ratings, test_split)
         
     def _split_ratings(self, ratings, test_split, rand=False):
         train_rating_idxs = []
@@ -234,7 +245,6 @@ class ProcessedMovieLens(Dataset):
         for i in range(users):
             rating_idxs = torch.where(ratings[0, :] == i)[0]
             if rand:
-                torch.manual_seed(42)
                 ratings_idxs = rating_idxs[torch.randperm(len(rating_idxs))]
                 
             split_idx = int(len(rating_idxs) * (1 - test_split))
@@ -244,7 +254,7 @@ class ProcessedMovieLens(Dataset):
         train_rating_idxs = torch.cat(train_rating_idxs, dim=0)
         test_rating_idxs = torch.cat(test_rating_idxs, dim=0)
         
-        return ratings[:, train_rating_idxs] if not self.test else ratings[:, test_rating_idxs]
+        return ratings[:, train_rating_idxs], ratings[:, test_rating_idxs]
 
     def _preprocess_ratings(self, data):
         edges = data[0][('user', 'rates', 'movie')]
