@@ -153,6 +153,7 @@ class ProcessedMovieLens(Dataset):
         self.processed_data = torch.load(root + self.PROCESSED_ML_SUBPATH)
         self.processed_ratings = self._preprocess_ratings(self.processed_data)
 
+
     def _preprocess_ratings(self, data):
         edges = data[0][('user', 'rates', 'movie')]
         edge_ratings = torch.concatenate([edges["edge_index"], edges["rating"].reshape((1, -1))])
@@ -164,14 +165,33 @@ class ProcessedMovieLens(Dataset):
         movie_feats, user_feats = self.processed_data[0]["movie"]["x"], self.processed_data[0]["user"]["x"]
 
         _, edge_size = edge_ratings.shape
-        indices = torch.randint(0, edge_size, (n_unique,))
-        sampled_edges = torch.ones((1, 1))
-        while len(sampled_edges[0, :].unique()) < n_unique or len(sampled_edges[1, :].unique()) < n_unique:
-            indices = torch.randint(0, edge_size, (n_unique,))
-            sampled_edges = edge_ratings[:, indices]
 
-        xs = edge_ratings[0, indices]
-        ys = edge_ratings[1, indices]
+        indices = np.random.choice(np.arange(edge_size), size=(n_unique,), replace=False)
+
+        xs = edge_ratings[0, indices].unique()
+        ys = edge_ratings[1, indices].unique()
+
+        unique_xs, unique_ys = len(xs.unique()), len(ys.unique())
+        users_missing, movies_missing = n_unique - unique_xs, n_unique - unique_ys
+
+        while users_missing > 0:
+            candidate_users = np.where(~np.isin(edge_ratings[0, :], xs.unique()) & np.isin(edge_ratings[1,:], ys.unique()))[0]
+            n_candidates = len(candidate_users)
+            new_indices = np.random.choice(candidate_users, size=(min(users_missing,n_candidates),), replace=False)
+            indices = np.concatenate([indices, new_indices])
+            xs = edge_ratings[0, indices].unique()
+            users_missing = n_unique - len(xs)
+
+        while movies_missing > 0:
+            candidate_movies = np.where(np.isin(edge_ratings[0, :], xs.unique()) & ~np.isin(edge_ratings[1,:], ys.unique()))[0]
+            n_candidates = len(candidate_movies)
+            new_indices = np.random.choice(candidate_movies, size=(min(movies_missing,n_candidates),), replace=False)
+            indices = np.concatenate([indices, new_indices])
+            ys = edge_ratings[1, indices].unique()
+            movies_missing = n_unique - len(ys)
+
+        xs = edge_ratings[0, indices].unique()
+        ys = edge_ratings[1, indices].unique()
 
         indices_xs = torch.where(torch.isin(edge_ratings[0, :], xs))[0]
         indices_ys = torch.where(torch.isin(edge_ratings[1, :], ys))[0]
@@ -183,11 +203,11 @@ class ProcessedMovieLens(Dataset):
 
         broadcasted_movie_feats, broadcasted_user_feats = (
             torch.broadcast_to(
-                movie_feats[ys.unique().sort().values, :].T.reshape((-1, 1, n_unique)).swapaxes(1, 2),
+                movie_feats[ys.sort().values, :].T.reshape((-1, 1, n_unique)).swapaxes(1, 2),
                 (-1, n_unique, n_unique)
             ).swapaxes(1, 2),
             torch.broadcast_to(
-                user_feats[xs.unique().sort().values, :].T.reshape((-1, 1, n_unique)).swapaxes(1, 2),
+                user_feats[xs.sort().values, :].T.reshape((-1, 1, n_unique)).swapaxes(1, 2),
                 (-1, n_unique, n_unique)
             )
         )
