@@ -267,7 +267,7 @@ class ProcessedMovieLens(Dataset):
         return data
 
     def from_edges(self, indices=None):
-        edge_ratings = self.processed_ratings
+        edge_ratings = self.ratings
         movie_feats, user_feats = self.processed_data[0]["movie"]["x"], self.processed_data[0]["user"]["x"]
 
         _, m = edge_ratings.shape
