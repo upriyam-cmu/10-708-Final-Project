@@ -166,20 +166,20 @@ class Attention(nn.Module):
         self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, 1, bias=False)
         self.to_out = nn.Conv2d(hidden_dim, dim, 1)
 
-    def forward(self, x, m=None):
-        b, c, h, w = x.shape
+    def forward(self, x, mask=None):
+        b, c, n, m = x.shape
 
         qkv = self.to_qkv(x).chunk(3, dim=1)
         q, k, v = map(lambda t: rearrange(t, 'b (h c) x y -> (b y) h x c', h=self.heads), qkv)
-        if exists(m):
-            mem_mask = repeat(self.mem_mask, 'h n d -> b h n d', b=b * w)
-            m = rearrange(m, 'b x y -> (b y) 1 1 x')
-            m = torch.cat((mem_mask, m), dim=-1)
+        if exists(mask):
+            mem_mask = repeat(self.mem_mask, 'h n d -> b h n d', b=b * m)
+            mask = rearrange(mask, 'b x y -> (b y) 1 1 x')
+            mask = torch.cat((mem_mask, mask), dim=-1)
 
-        mk, mv = map(lambda t: repeat(t, 'h n d -> b h n d', b=b * w), self.mem_kv)
+        mk, mv = map(lambda t: repeat(t, 'h n d -> b h n d', b=b * m), self.mem_kv)
         k, v = map(partial(torch.cat, dim=-2), ((mk, k), (mv, v)))
 
-        out = self.attend(q, k, v, m)
+        out = self.attend(q, k, v, mask)
 
         out = rearrange(out, '(b y) h x d -> b (h d) x y', b=b)
         return self.to_out(out)

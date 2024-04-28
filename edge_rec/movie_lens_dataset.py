@@ -23,7 +23,7 @@ RATING_HEADERS = ['userId', 'movieId', 'rating', 'timestamp']
 
 def rating_transform(data):
     ratings = data[2, :]
-    data[2, :] = 2*(ratings - 3)/5
+    data[2, :] = 2 * (ratings - 3) / 5
     return data
 
 
@@ -171,7 +171,7 @@ class ProcessedMovieLens(Dataset):
 
         while users_missing > 0:
             candidate_users = \
-            np.where(~np.isin(edge_ratings[0, :], xs.unique()) & np.isin(edge_ratings[1, :], ys.unique()))[0]
+                np.where(~np.isin(edge_ratings[0, :], xs.unique()) & np.isin(edge_ratings[1, :], ys.unique()))[0]
             n_candidates = len(candidate_users)
             new_indices = np.random.choice(candidate_users, size=(min(users_missing, n_candidates),), replace=False)
             indices = np.concatenate([indices, new_indices])
@@ -180,7 +180,7 @@ class ProcessedMovieLens(Dataset):
 
         while movies_missing > 0:
             candidate_movies = \
-            np.where(np.isin(edge_ratings[0, :], xs.unique()) & ~np.isin(edge_ratings[1, :], ys.unique()))[0]
+                np.where(np.isin(edge_ratings[0, :], xs.unique()) & ~np.isin(edge_ratings[1, :], ys.unique()))[0]
             n_candidates = len(candidate_movies)
             new_indices = np.random.choice(candidate_movies, size=(min(movies_missing, n_candidates),), replace=False)
             indices = np.concatenate([indices, new_indices])

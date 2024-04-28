@@ -1,6 +1,7 @@
 import math
 from pathlib import Path
 from functools import partial
+from itertools import product
 from collections import namedtuple
 from multiprocessing import cpu_count
 
@@ -240,7 +241,7 @@ class GaussianDiffusion(nn.Module):
 
     def predict_noise_from_start(self, x_t, t, x0):
         return (
-                (extract(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t - x0) / \
+                (extract(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t - x0) /
                 extract(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape)
         )
 
@@ -315,23 +316,62 @@ class GaussianDiffusion(nn.Module):
         pred_img = model_mean + (0.5 * model_log_variance).exp() * noise
         return pred_img, x_start
 
-    @torch.inference_mode()
-    def p_sample_loop(self, x_start, return_all_timesteps=False):
-        batch, device = x_start.shape[0], self.device
+    def _subsample_img(self, img, sample_full_params):
+        if sample_full_params is None:
+            yield img, None
+        else:
+            b, f, h, w = img.shape
+            assert b == 1
+            max_batch_size, *all_subgraph_sizes = sample_full_params
+            for subgraph_sizes in all_subgraph_sizes:
+                n, m = (subgraph_sizes, subgraph_sizes) if isinstance(subgraph_sizes, int) else subgraph_sizes
 
+                def _get_block_inds(dim_size, block_size):
+                    assert dim_size >= block_size
+                    inds = np.empty((dim_size - 1) // block_size + 1)
+                    inds[:dim_size] = np.random.permutation(dim_size)
+                    inds[dim_size:] = inds[:len(inds) - dim_size]
+                    return np.split(inds, range(block_size, dim_size, block_size))
+
+                split_iter = iter(product(_get_block_inds(h, n), _get_block_inds(w, m)))
+                while True:
+                    sample_inds = []
+                    try:
+                        for _ in range(max_batch_size):
+                            sample_inds.append(next(split_iter))
+                    except StopIteration:
+                        pass
+                    if len(sample_inds) > 0:
+                        data = torch.empty(len(sample_inds), f, n, m, dtype=img.dtype, device=img.device)
+                        for i, (h_inds, w_inds) in enumerate(sample_inds):
+                            data[i, :, :, :] = img[0, :, h_inds, w_inds]
+                        yield data, sample_inds
+                    if len(sample_inds) < max_batch_size:
+                        # end of samples
+                        break
+
+    @torch.inference_mode()
+    def p_sample_loop(self, x_start, return_all_timesteps=False, sample_full_params=None):
         img = x_start
         imgs = [img]
 
-        x_start = None
-
         for t in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step', total=self.num_timesteps):
-            img, _ = self.p_sample(img, t, self_cond=None)
+            for sub_img, ind_map in self._subsample_img(img, sample_full_params):
+                new_img, _ = self.p_sample(sub_img, t, self_cond=None)
+                if ind_map is None:
+                    new_img[:, 1:, :, :] = sub_img[:, 1:, :, :]
+                    img = new_img
+                else:
+                    assert len(new_img) == len(ind_map)
+                    assert img.shape[0] == 1
+                    for i, (h_inds, w_inds) in enumerate(ind_map):
+                        img[0, 0, h_inds, w_inds] = new_img[i, 0, :, :]
             imgs.append(img)
 
         return img if not return_all_timesteps else torch.stack(imgs, dim=1)
 
     @torch.inference_mode()
-    def ddim_sample(self, x_start, return_all_timesteps=False):
+    def ddim_sample(self, x_start, return_all_timesteps=False, sample_full_params=None):
         batch, device, total_timesteps, sampling_timesteps, eta, objective = x_start.shape[
             0], self.device, self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective
 
@@ -344,35 +384,48 @@ class GaussianDiffusion(nn.Module):
         imgs = [img]
 
         for time, time_next in tqdm(time_pairs, desc='sampling loop time step'):
-            time_cond = torch.full((batch,), time, device=device, dtype=torch.long)
-            pred_noise, _, *_ = self.model_predictions(img, time_cond, clip_x_start=True, rederive_pred_noise=True)
-
             if time_next < 0:
                 img = x_start
                 imgs.append(img)
                 continue
 
+            time_cond = torch.full((batch,), time, device=device, dtype=torch.long)
             alpha = self.alphas_cumprod[time]
             alpha_next = self.alphas_cumprod[time_next]
-
             sigma = eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
             c = (1 - alpha_next - sigma ** 2).sqrt()
+            scaled_x_start = x_start * alpha_next.sqrt()
+            for sub_img, ind_map in self._subsample_img(img, sample_full_params):
+                pred_noise, _, *_ = self.model_predictions(
+                    sub_img, time_cond,
+                    clip_x_start=True, rederive_pred_noise=True
+                )
 
-            noise = torch.randn_like(img)
-            noise[:, 1:, :, :] = 0
-
-            img = x_start * alpha_next.sqrt() + \
-                  c * pred_noise + \
-                  sigma * noise
-
+                all_noise = c * pred_noise + sigma * torch.randn_like(sub_img)
+                if ind_map is None:
+                    new_img = all_noise + scaled_x_start
+                    new_img[:, 1:, :, :] = sub_img[:, 1:, :, :]
+                    img = new_img
+                else:
+                    assert len(all_noise) == len(ind_map)
+                    assert img.shape[0] == 1
+                    for i, (h_inds, w_inds) in enumerate(ind_map):
+                        img[0, 0, h_inds, w_inds] = all_noise[i, 0, :, :] + scaled_x_start[0, 0, h_inds, w_inds]
             imgs.append(img)
 
         return img if not return_all_timesteps else torch.stack(imgs, dim=1)
 
     @torch.inference_mode()
-    def sample(self, x_start, return_all_timesteps=False):
+    def sample(self, x_start, return_all_timesteps=False, sample_full_params=None):
         sample_fn = self.p_sample_loop if not self.is_ddim_sampling else self.ddim_sample
-        return sample_fn(x_start, return_all_timesteps=return_all_timesteps)
+        assert not return_all_timesteps or sample_full_params is None
+        return sample_fn(x_start, return_all_timesteps=return_all_timesteps, sample_full_params=sample_full_params)
+
+    @torch.inference_mode()
+    def sample_full(self, x_start, max_batch_size, *subgraph_sizes):
+        if len(x_start.shape) == 3:
+            x_start = x_start.unsqueeze(dim=0)
+        return self.sample(x_start, return_all_timesteps=False, sample_full_params=(max_batch_size, *subgraph_sizes))
 
     @torch.inference_mode()
     def interpolate(self, x1, x2, t=None, lam=0.5):
@@ -420,6 +473,7 @@ class GaussianDiffusion(nn.Module):
 
         # noise sample
         x = self.q_sample(x_start=x_start, t=t, noise=noise)
+        x[:, 1:, :, :] = x_start[:, 1:, :, :]
 
         # if doing self-conditioning, 50% of the time, predict x_start from current set of times
         # and condition with unet with that

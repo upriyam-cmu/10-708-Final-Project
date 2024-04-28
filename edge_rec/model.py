@@ -237,10 +237,21 @@ class SubgraphAttnModel(nn.Module):
                 out_dim=out_dim
             )
 
+    @staticmethod
+    def _row_attn(subgraph, mask, block, t):
+        return pipe(subgraph, mask) | block["row_attn"] | modulate(t[2]) | pipe.extract
+
+    @staticmethod
+    def _col_attn(subgraph, mask, block, t):
+        return pipe(T(subgraph), mask) | block["col_attn"] | T | modulate(t[3]) | pipe.extract
+
     def forward(self, subgraph, times, mask):
         """
         subgraph: Tensor(shape=(b, f, n, m))
         """
+        _, _, n, m = subgraph.shape
+        assert n != 1 or m != 1
+
         time_embeds = self.time_embed_initial(times)
         for block in self.blocks:
             block_time_embeds_1 = pipe(time_embeds) | block["time_embed_1"] | idx('b c -> b c 1 1') | pipe.extract
@@ -248,13 +259,26 @@ class SubgraphAttnModel(nn.Module):
             t, t2 = tuple(block_time_embeds_1.chunk(8, dim=1)), block_time_embeds_2
 
             subgraph = pipe(subgraph) | block["layer_norm_1"] | modulate(t[0], t[1]) | pipe.extract
-            row_attn = pipe(subgraph, mask) | block["row_attn"] | modulate(t[2]) | pipe.extract
-            col_attn = pipe(T(subgraph), mask) | block["col_attn"] | T | modulate(t[3]) | pipe.extract
+
+            row_attn = col_attn = None
+            if n != 1:
+                row_attn = pipe(subgraph, mask) | block["row_attn"] | modulate(t[2]) | pipe.extract
+            if m != 1:
+                col_attn = pipe(T(subgraph), mask) | block["col_attn"] | T | modulate(t[3]) | pipe.extract
+            if row_attn is None:
+                row_attn = col_attn
+            if col_attn is None:
+                col_attn = row_attn
+
             merged = torch.cat([row_attn + 0.5 * subgraph, col_attn + 0.5 * subgraph], dim=1)
+
             normed = pipe(merged) | block["layer_norm_2"] | modulate(t[4:6], t[6:8]) | pipe.extract
             projected = pipe(normed) | block["feed_forward"] | modulate(t2) | pipe.extract
+
             residual = pipe(merged) | block["residual_transform"] | pipe.extract
+
             subgraph = projected + residual
+
         return subgraph
 
 
