@@ -23,11 +23,7 @@ RATING_HEADERS = ['userId', 'movieId', 'rating', 'timestamp']
 
 def rating_transform(data):
     ratings = data[2, :]
-    ratings[ratings == 1] = -5
-    ratings[ratings == 2] = -2
-    ratings[ratings == 3] = 0
-    ratings[ratings == 4] = 2
-    data[2, :] = ratings
+    data[2, :] = 2*(ratings - 3)/5
     return data
 
 
