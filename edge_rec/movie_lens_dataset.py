@@ -395,11 +395,30 @@ class ProcessedMovieLens(Dataset):
         self.transform = transform
         print(root + self.PROCESSED_ML_SUBPATH)
         self.processed_data = torch.load(root + self.PROCESSED_ML_SUBPATH)
-        self.num_users = self.processed_data[0]['user']['x'].shape[0]
-        self.num_movies = self.processed_data[0]['movie']['x'].shape[0]
-
+        self.user_feats = self.processed_data[0]['user']['x']
+        self.movie_feats = self.processed_data[0]['movie']['x']
+        self.num_users = self.user_feats.shape[0]
+        self.num_movies = self.movie_feats.shape[0]
+        
         self.processed_ratings = self._preprocess_ratings(self.processed_data)
         self.train_idxs, self.test_idxs = self._split_ratings(test_split)
+        
+    def build_feat_graph(self):
+        movie_feats, user_feats = self.movie_feats, self.user_feats
+        ratings = self.processed_ratings
+        
+        ratings_graph = torch.zeros(self.num_users, self.num_movies)
+        ratings_graph[ratings[0], ratings[1]] = ratings[2].float()
+        ratings_graph = ratings_graph.unsqueeze(-1)
+        
+        user_ids, movie_ids = torch.meshgrid(torch.arange(self.num_users), 
+                                             torch.arange(self.num_movies))
+        
+        user_feat_graph = user_feats[user_ids]
+        movie_feat_graph = movie_feats[movie_ids]
+        
+        full_graph = torch.cat([ratings_graph, movie_feat_graph, user_feat_graph], dim=-1)
+        return full_graph.permute(2, 0, 1)
 
     def _split_ratings(self, test_split):
         train_rating_idxs = []
@@ -430,7 +449,7 @@ class ProcessedMovieLens(Dataset):
 
     def from_edges(self, indices=None):
         edge_ratings = self.processed_ratings
-        movie_feats, user_feats = self.processed_data[0]["movie"]["x"], self.processed_data[0]["user"]["x"]
+        movie_feats, user_feats = self.movie_feats, self.user_feats
 
         if indices is None:  # if indices is not passed, take the whole graph
             _, m = edge_ratings.shape
