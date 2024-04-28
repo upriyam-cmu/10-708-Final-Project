@@ -2,24 +2,117 @@ import torch
 import numpy as np
 import pandas as pd
 from torch.utils.data import Dataset
-from torch_geometric.datasets import MovieLens1M
+from torch_geometric.datasets import MovieLens1M, MovieLens100K
 from sklearn.preprocessing import QuantileTransformer
 
 from torch_geometric.data import HeteroData
 
-MOVIE_HEADERS = ["movieId", "title", "genres"]
-USER_HEADERS = ["userId", "gender", "age", "occupation", "zipCode"]
-RATING_HEADERS = ['userId', 'movieId', 'rating', 'timestamp']
 
+class RawMovieLens100K(MovieLens100K):
+    MOVIE_HEADERS = [
+    "movieId", "title", "releaseDate", "videoReleaseDate", "IMDb URL",
+    "unknown", "Action", "Adventure", "Animation", "Children's", "Comedy",
+    "Crime", "Documentary", "Drama", "Fantasy", "Film-Noir", "Horror",
+    "Musical", "Mystery", "Romance", "Sci-Fi", "Thriller", "War", "Western"
+    ]
+    USER_HEADERS = ["userId", "age", "gender", "occupation", "zipCode"]
+    RATING_HEADERS = ["userId", "movieId", "rating", "timestamp"]
 
-def rating_transform(data):
-    data = data.float()
-    ratings = data[0, :, :]
-    data[0, :, :] = 2 * (ratings - 3) / 5
-    return data
+    def __init__(self, root, transform=None, pre_transform=None, force_reload=False):
+        super(RawMovieLens100K, self).__init__(root, transform, pre_transform, force_reload)
 
+    def process(self) -> None:
+        import pandas as pd
+
+        data = HeteroData()
+
+        # Process movie data:
+        df = pd.read_csv(
+            self.raw_paths[0],
+            sep='|',
+            header=None,
+            names=self.MOVIE_HEADERS,
+            index_col='movieId',
+            encoding='ISO-8859-1',
+        )
+        movie_mapping = {idx: i for i, idx in enumerate(df.index)}
+
+        x = df[MOVIE_HEADERS[6:]].values
+        data['movie'].x = torch.from_numpy(x).to(torch.float)
+
+        self.df = df
+
+        # Process user data:
+        df = pd.read_csv(
+            self.raw_paths[1],
+            sep='|',
+            header=None,
+            names=self.USER_HEADERS,
+            index_col='userId',
+            encoding='ISO-8859-1',
+        )
+        user_mapping = {idx: i for i, idx in enumerate(df.index)}
+
+        age = df['age'].apply(str).str.get_dummies().values.argmax(axis=1)[:, None]
+        age = torch.from_numpy(age).to(torch.float)
+
+        gender = df['gender'].str.get_dummies().values[:, 0][:, None]
+        gender = torch.from_numpy(gender).to(torch.float)
+
+        occupation = df['occupation'].str.get_dummies().values.argmax(axis=1)[:, None]
+        occupation = torch.from_numpy(occupation).to(torch.float)
+
+        data['user'].x = torch.cat([age, gender, occupation], dim=-1)
+
+        # Process rating data for training:
+        df = pd.read_csv(
+            self.raw_paths[2],
+            sep='\t',
+            header=None,
+            names=self.RATING_HEADERS,
+        )
+
+        src = [user_mapping[idx] for idx in df['userId']]
+        dst = [movie_mapping[idx] for idx in df['movieId']]
+        edge_index = torch.tensor([src, dst])
+        data['user', 'rates', 'movie'].edge_index = edge_index
+
+        rating = torch.from_numpy(df['rating'].values).to(torch.long)
+        data['user', 'rates', 'movie'].rating = rating
+
+        time = torch.from_numpy(df['timestamp'].values)
+        data['user', 'rates', 'movie'].time = time
+
+        data['movie', 'rated_by', 'user'].edge_index = edge_index.flip([0])
+        data['movie', 'rated_by', 'user'].rating = rating
+        data['movie', 'rated_by', 'user'].time = time
+
+        # Process rating data for testing:
+        df = pd.read_csv(
+            self.raw_paths[3],
+            sep='\t',
+            header=None,
+            names=self.RATING_HEADERS,
+        )
+
+        src = [user_mapping[idx] for idx in df['userId']]
+        dst = [movie_mapping[idx] for idx in df['movieId']]
+        edge_label_index = torch.tensor([src, dst])
+        data['user', 'rates', 'movie'].edge_label_index = edge_label_index
+
+        edge_label = torch.from_numpy(df['rating'].values).to(torch.float)
+        data['user', 'rates', 'movie'].edge_label = edge_label
+
+        if self.pre_transform is not None:
+            data = self.pre_transform(data)
+
+        self.save([data], self.processed_paths[0])
 
 class RawMovieLens1M(MovieLens1M):
+    MOVIE_HEADERS = ["movieId", "title", "genres"]
+    USER_HEADERS = ["userId", "gender", "age", "occupation", "zipCode"]
+    RATING_HEADERS = ['userId', 'movieId', 'rating', 'timestamp']
+    
     def __init__(self, root, transform=None, pre_transform=None, force_reload=False):
         super(RawMovieLens1M, self).__init__(root, transform, pre_transform, force_reload)
 
@@ -46,7 +139,7 @@ class RawMovieLens1M(MovieLens1M):
             sep='::',
             header=None,
             index_col='movieId',
-            names=MOVIE_HEADERS,
+            names=self.MOVIE_HEADERS,
             encoding='ISO-8859-1',
             engine='python',
         )
@@ -63,7 +156,7 @@ class RawMovieLens1M(MovieLens1M):
             sep='::',
             header=None,
             index_col='userId',
-            names=USER_HEADERS,
+            names=self.USER_HEADERS,
             dtype='str',
             encoding='ISO-8859-1',
             engine='python',
@@ -88,7 +181,7 @@ class RawMovieLens1M(MovieLens1M):
             self.raw_paths[2],
             sep='::',
             header=None,
-            names=RATING_HEADERS,
+            names=self.RATING_HEADERS,
             encoding='ISO-8859-1',
             engine='python',
         )
@@ -127,12 +220,14 @@ class RatingQuantileTransform(object):
 class ProcessedMovieLens(Dataset):
     PROCESSED_ML_SUBPATH = "/processed/data.pt"
 
-    def __init__(self, root, n_subsamples=10000, n_unique_per_sample=10, dataset_transform=None,
+    def __init__(self, root, ml_100k=True, n_subsamples=10000, n_unique_per_sample=10, dataset_transform=None,
                  transform=None, test_split=0.1,
                  download=True):
+        dataset_class = RawMovieLens100K if ml_100k else RawMovieLens1M
+
         if download:
-            self.ml_1m = RawMovieLens1M(root, force_reload=True)
-            self.ml_1m.process()
+            self.raw = dataset_class(root, force_reload=True)
+            self.raw.process()
 
         self.n_unique_per_sample = n_unique_per_sample
         self.n_subsamples = n_subsamples
@@ -147,7 +242,7 @@ class ProcessedMovieLens(Dataset):
         train_rating_idxs = []
         test_rating_idxs = []
         
-        users = self.ml_1m.data['user']['x'].shape[0]
+        users = self.raw.data['user']['x'].shape[0]
         for i in range(users):
             rating_idxs = torch.where(ratings[0, :] == i)[0]
             if rand:
@@ -166,6 +261,12 @@ class ProcessedMovieLens(Dataset):
         edges = data[0][('user', 'rates', 'movie')]
         edge_ratings = torch.concatenate([edges["edge_index"], edges["rating"].reshape((1, -1))])
         return edge_ratings
+    
+    def _rating_transform(self, data):
+        data = data.float()
+        ratings = data[0, :, :]
+        data[0, :, :] = 2 * (ratings - 3) / 5
+        return data
 
     def from_edges(self, indices=None):
         edge_ratings = self.processed_ratings
@@ -216,7 +317,7 @@ class ProcessedMovieLens(Dataset):
             edge_mask[None, :, :]
         ], dim=0)
 
-        out = self.dataset_transform(out)
+        out = self._rating_transform(out)
 
         return out
 
