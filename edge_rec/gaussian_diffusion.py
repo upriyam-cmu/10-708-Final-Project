@@ -588,7 +588,8 @@ class Trainer(object):
 
         download = not Path(folder + "/processed/data.pt").exists()
         # dataset and dataloader
-        self.ds = ProcessedMovieLens(folder, n_subsamples, n_unique_per_sample=self.image_size[0], download=download)
+        self.ds = ProcessedMovieLens(folder, n_subsamples, n_unique_per_sample=self.image_size[0], test=False, download=download)
+        self.test_ds = ProcessedMovieLens(folder, n_subsamples, n_unique_per_sample=self.image_size[0], test=True, download=download)
 
         dl = DataLoader(self.ds, batch_size=train_batch_size, shuffle=True, pin_memory=True, num_workers=cpu_count())
 
@@ -725,7 +726,7 @@ class Trainer(object):
     def eval(self, milestone=None, batch_size=16, subgraph_size=(128, 128)):
         if milestone is not None:
             self.load(milestone)
-        full_graph = self.ds.from_edges()[:-1]
+        full_graph = self.test_ds.from_edges()[:-1]
         full_graph[0, :] = torch.randn_like(full_graph[0])
         full_graph = full_graph.unsqueeze(dim=0).to(self.device)
         sampled_graph = self.ema.ema_model.sample_full(full_graph, batch_size, subgraph_size)
@@ -741,7 +742,7 @@ class Trainer(object):
         pred_graph[train_edges[0], train_edges[1]] = float('-inf')
         ranked = torch.argsort(pred_graph, dim=1, descending=True)
 
-        test_edges = self.ds.test_ratings
+        test_edges = self.test_ds.processed_ratings
         test_graph = torch.zeros_like(pred_graph)
         test_graph[test_edges[0], test_edges[1]] = test_edges[2]
 
