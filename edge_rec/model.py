@@ -39,7 +39,8 @@ def toi(x):
 
 def assert_in(low, high):
     def _check(x: torch.Tensor):
-        assert torch.all((low <= x) & (x < high))
+        n_low, n_high = (~(low <= x)).sum(), (~(x < high)).sum()
+        assert n_low == 0 and n_high == 0, f"n_low={n_low}, n_high={n_high}"
         return x
 
     return _check
