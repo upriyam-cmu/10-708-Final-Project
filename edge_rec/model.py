@@ -89,7 +89,7 @@ def get_kwargs(kwargs, **defaults):
 class MovieLensFeatureEmb(nn.Module):
     MAX_N_GENRES = 6
 
-    N_AGE_VALUES = 6
+    N_AGE_VALUES = 7
     N_GENDER_VALUES = 2
     N_OCCUPATION_VALUES = 21
     N_GENRE_VALUES = 19
