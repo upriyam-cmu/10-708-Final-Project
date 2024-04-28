@@ -22,7 +22,7 @@ from ema_pytorch import EMA
 
 from accelerate import Accelerator
 
-from edge_rec.movie_lens_dataset import ProcessedMovieLens
+from edge_rec.movie_lens_dataset import ProcessedMovieLens, FullGraphSampler
 
 ModelPrediction = namedtuple('ModelPrediction', ['pred_noise', 'pred_x_start'])
 
@@ -371,9 +371,10 @@ class GaussianDiffusion(nn.Module):
         img = x_start
         imgs = [img]
 
-        for t in reversed(range(0, self.num_timesteps)):
+        tqdm2 = (lambda x, *y, **z: x) if sample_full_params is None else tqdm
+        for t in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step', total=self.num_timesteps):
             subsampler, n_subsamples = self._subsample_img(img, sample_full_params)
-            for sub_img, ind_map in subsampler():
+            for sub_img, ind_map in tqdm2(subsampler(), desc='subsampling loop', total=n_subsamples):
                 new_img, _ = self.p_sample(sub_img, t, self_cond=None)
                 if ind_map is None:
                     new_img[:, 1:, :, :] = sub_img[:, 1:, :, :]
@@ -524,6 +525,7 @@ class GaussianDiffusion(nn.Module):
         return loss.mean()
 
     def forward(self, img, edge_mask=None, *args, **kwargs):
+        # print(img.shape)
         b, c, h, w, device, img_size, = *img.shape, img.device, self.image_size
         assert h == img_size[0] and w == img_size[1], f'height and width of image must be {img_size}'
         t = torch.randint(0, self.num_timesteps, (b,), device=device).long()
@@ -553,7 +555,8 @@ class Trainer(object):
             mixed_precision_type='fp16',
             split_batches=True,
             max_grad_norm=1.,
-            save_best_and_latest_only=False
+            save_best_and_latest_only=False,
+            train_on_full_graph=False
     ):
         super().__init__()
 
@@ -576,6 +579,10 @@ class Trainer(object):
         self.save_and_sample_every = save_and_sample_every
         self.full_sample = full_sample
 
+        if train_on_full_graph:
+            train_batch_size = 1
+            gradient_accumulate_every = 16
+
         self.batch_size = train_batch_size
         self.gradient_accumulate_every = gradient_accumulate_every
         assert (train_batch_size * gradient_accumulate_every) >= 16, \
@@ -588,18 +595,22 @@ class Trainer(object):
 
         download = not Path(folder + "/processed/data.pt").exists()
         # dataset and dataloader
-        self.ds = ProcessedMovieLens(folder, n_subsamples, n_unique_per_sample=self.image_size[0], download=download)
+        ds = ProcessedMovieLens(folder, n_subsamples, n_unique_per_sample=self.image_size[0], download=download)
+        self.ds = FullGraphSampler(ds) if train_on_full_graph else ds
 
         dl = DataLoader(self.ds, batch_size=train_batch_size, shuffle=True, pin_memory=True, num_workers=cpu_count())
 
         dl = self.accelerator.prepare(dl)
         self.dl = cycle(dl)
-        
+
         # test dataset and dataloader
-        self.test_ds = ProcessedMovieLens(folder, n_subsamples, n_unique_per_sample=self.image_size[0], download=download, train=False)
-        
-        test_dl = DataLoader(self.test_ds, batch_size=train_batch_size, shuffle=True, pin_memory=True, num_workers=cpu_count())
-        
+        test_ds = ProcessedMovieLens(folder, n_subsamples, n_unique_per_sample=self.image_size[0],
+                                     download=download, train=False)
+        self.test_ds = FullGraphSampler(test_ds) if train_on_full_graph else test_ds
+
+        test_dl = DataLoader(self.test_ds, batch_size=train_batch_size, shuffle=True, pin_memory=True,
+                             num_workers=cpu_count())
+
         test_dl = self.accelerator.prepare(test_dl)
         self.test_dl = cycle(test_dl)
 
@@ -737,4 +748,3 @@ class Trainer(object):
             sampled_graph[0, 0, :, :].cpu().detach().numpy()
         )
         return sampled_graph
-

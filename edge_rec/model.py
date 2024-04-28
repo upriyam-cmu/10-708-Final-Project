@@ -245,11 +245,11 @@ class SubgraphAttnModel(nn.Module):
     def _col_attn(subgraph, mask, block, t):
         return pipe(T(subgraph), mask) | block["col_attn"] | T | modulate(t[3]) | pipe.extract
 
-    def forward(self, subgraph, times, mask):
+    def forward(self, subgraph, times, mask, batch_size=None):
         """
         subgraph: Tensor(shape=(b, f, n, m))
         """
-        _, _, n, m = subgraph.shape
+        b, _, n, m = subgraph.shape
         assert n != 1 or m != 1
 
         time_embeds = self.time_embed_initial(times)
@@ -260,15 +260,36 @@ class SubgraphAttnModel(nn.Module):
 
             subgraph = pipe(subgraph) | block["layer_norm_1"] | modulate(t[0], t[1]) | pipe.extract
 
-            row_attn = col_attn = None
-            if n != 1:
-                row_attn = pipe(subgraph, mask) | block["row_attn"] | modulate(t[2]) | pipe.extract
-            if m != 1:
-                col_attn = pipe(T(subgraph), mask) | block["col_attn"] | T | modulate(t[3]) | pipe.extract
-            if row_attn is None:
-                row_attn = col_attn
-            if col_attn is None:
-                col_attn = row_attn
+            if batch_size is None:
+                row_attn = col_attn = None
+                if n != 1:
+                    row_attn = pipe(subgraph, mask) | block["row_attn"] | modulate(t[2]) | pipe.extract
+                if m != 1:
+                    col_attn = pipe(T(subgraph), mask) | block["col_attn"] | T | modulate(t[3]) | pipe.extract
+                if row_attn is None:
+                    row_attn = col_attn
+                if col_attn is None:
+                    col_attn = row_attn
+            else:
+                assert b == 1
+                chunk = lambda x: x.tensor_split(tuple(range(batch_size, len(x), batch_size)), dim=0)
+                merge = lambda x: torch.cat(x, dim=0)
+
+                batched_rows = pipe(subgraph) | idx('b f n m -> m f n b') | chunk | pipe.extract
+                rows_mask = pipe(mask) | idx('b n m -> m n b') | chunk | pipe.extract
+                processed_rows = tuple(
+                    pipe(batch, batch_mask) | block["row_attn"] | modulate(t[2]) | pipe.extract
+                    for batch, batch_mask in zip(batched_rows, rows_mask)
+                )
+                batched_cols = pipe(subgraph) | idx('b f n m -> n f m b') | chunk | pipe.extract
+                cols_mask = pipe(mask) | idx('b n m -> n m b') | chunk | pipe.extract
+                processed_cols = tuple(
+                    pipe(batch, batch_mask) | block["col_attn"] | modulate(t[3]) | pipe.extract
+                    for batch, batch_mask in zip(batched_cols, cols_mask)
+                )
+
+                row_attn = pipe(processed_rows) | merge | idx('m f n b -> b f n m') | pipe.extract
+                col_attn = pipe(processed_cols) | merge | idx('n f m b -> b f n m') | pipe.extract
 
             merged = torch.cat([row_attn + 0.5 * subgraph, col_attn + 0.5 * subgraph], dim=1)
 
@@ -290,17 +311,17 @@ class GraphReconstructionModel(nn.Module):
 
     def forward(self, x, t, mask=None):
         x = self.embedding(x)
-        out = self.core_model(x, t, mask=mask)
+        out = self.core_model(x, t, mask=mask, batch_size=1)
         assert out.shape[1] == 1
         return out.squeeze(dim=1)
 
     @staticmethod
     def default():
-        embed = MovieLensFeatureEmb()
+        embed = MovieLensFeatureEmb(3, 2, 4, 8)
         return GraphReconstructionModel(
             embed,
             SubgraphAttnModel(
-                embed.embed_dim, [32, 32, 16],
+                embed.embed_dim, [],
                 SinusoidalPosEmb(embed.embed_dim + embed.embed_dim % 2)
             )
         )

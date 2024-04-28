@@ -399,25 +399,35 @@ class ProcessedMovieLens(Dataset):
         self.movie_feats = self.processed_data[0]['movie']['x']
         self.num_users = self.user_feats.shape[0]
         self.num_movies = self.movie_feats.shape[0]
-        
+
         self.processed_ratings = self._preprocess_ratings(self.processed_data)
         self.train_idxs, self.test_idxs = self._split_ratings(test_split)
-        
-    def build_feat_graph(self):
+
+    def build_feat_graph(self, transform_ratings=False, include_mask=False):
         movie_feats, user_feats = self.movie_feats, self.user_feats
         ratings = self.processed_ratings
-        
+
         ratings_graph = torch.zeros(self.num_users, self.num_movies)
         ratings_graph[ratings[0], ratings[1]] = ratings[2].float()
         ratings_graph = ratings_graph.unsqueeze(-1)
-        
-        user_ids, movie_ids = torch.meshgrid(torch.arange(self.num_users), 
-                                             torch.arange(self.num_movies))
-        
+        is_known_mask = ratings_graph != 0
+        if transform_ratings:
+            ratings_graph[is_known_mask] += 3
+            ratings_graph = self._rating_transform(ratings_graph)
+
+        user_ids, movie_ids = torch.meshgrid(
+            torch.arange(self.num_users),
+            torch.arange(self.num_movies),
+            indexing='ij'
+        )
+
         user_feat_graph = user_feats[user_ids]
         movie_feat_graph = movie_feats[movie_ids]
-        
-        full_graph = torch.cat([ratings_graph, movie_feat_graph, user_feat_graph], dim=-1)
+
+        components = [ratings_graph, movie_feat_graph, user_feat_graph]
+        if include_mask:
+            components += [is_known_mask]
+        full_graph = torch.cat(components, dim=-1)
         return full_graph.permute(2, 0, 1)
 
     def _split_ratings(self, test_split):
@@ -560,3 +570,14 @@ class ProcessedMovieLens(Dataset):
 
     def __len__(self):
         return self.n_subsamples
+
+
+class FullGraphSampler(Dataset):
+    def __init__(self, ds):
+        self.ds = ds
+
+    def __getitem__(self, idx):
+        return self.ds.build_feat_graph(transform_ratings=True, include_mask=True)
+
+    def __len__(self):
+        return 1

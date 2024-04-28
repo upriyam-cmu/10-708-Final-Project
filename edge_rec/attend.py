@@ -132,7 +132,7 @@ class Attend(nn.Module):
 
         sim = einsum(f"b h i d, b h j d -> b h i j", q, k) * scale
         if exists(m):
-            sim = sim.masked_fill(~m, float('-inf'))
+            sim = sim.masked_fill_(~m, float('-inf'))
 
         # attention
 
