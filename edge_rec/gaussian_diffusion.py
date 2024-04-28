@@ -544,7 +544,7 @@ class Trainer(object):
 
         self.max_grad_norm = max_grad_norm
         
-        download = Path(folder + "/processed/data.pt").exists()
+        download = not Path(folder + "/processed/data.pt").exists()
         # dataset and dataloader
         self.ds = ProcessedMovieLens(folder, n_subsamples, n_unique_per_sample=self.image_size[0],
                                      dataset_transform=rating_transform, download=download)
