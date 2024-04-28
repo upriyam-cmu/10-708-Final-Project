@@ -209,9 +209,11 @@ class RawMovieLens1M(MovieLens1M):
 class ProcessedMovieLens(Dataset):
     PROCESSED_ML_SUBPATH = "/processed/data.pt"
 
-    def __init__(self, root, ml_100k=True, n_subsamples=10000, n_unique_per_sample=10, transform=None, test_split=0.1,
-                 download=True):
+    def __init__(self, root, ml_100k=True, n_subsamples=10000, n_unique_per_sample=10,
+                 transform=None, train=True, test_split=0.1, download=True):
         dataset_class = RawMovieLens100K if ml_100k else RawMovieLens1M
+
+        self.train = train
 
         if download:
             self.raw = dataset_class(root, force_reload=True)
@@ -221,20 +223,20 @@ class ProcessedMovieLens(Dataset):
         self.n_subsamples = n_subsamples
         self.transform = transform
         print(root + self.PROCESSED_ML_SUBPATH)
-        self.processed_data = torch.load(root + self.PROCESSED_ML_SUBPATH)
-        self.ratings = self._preprocess_ratings(self.processed_data)
-        self.processed_ratings, self.test_ratings = self._split_ratings(self.ratings, test_split)
         
-    def _split_ratings(self, ratings, test_split, rand=False):
+        self.processed_data = torch.load(root + self.PROCESSED_ML_SUBPATH)
+        self.num_users = self.processed_data[0]['user']['x'].shape[0]
+        self.num_movies = self.processed_data[0]['movie']['x'].shape[0]
+        
+        self.processed_ratings = self._preprocess_ratings(self.processed_data)
+        self.train_idxs, self.test_idxs = self._split_ratings(test_split)
+
+    def _split_ratings(self, test_split):
         train_rating_idxs = []
         test_rating_idxs = []
         
-        users = self.processed_data[0]['user']['x'].shape[0]
-        for i in range(users):
-            rating_idxs = torch.where(ratings[0, :] == i)[0]
-            if rand:
-                ratings_idxs = rating_idxs[torch.randperm(len(rating_idxs))]
-                
+        for i in range(self.num_users):
+            rating_idxs = torch.where(self.processed_ratings[0, :] == i)[0]
             split_idx = int(len(rating_idxs) * (1 - test_split))
             train_rating_idxs.append(rating_idxs[:split_idx])
             test_rating_idxs.append(rating_idxs[split_idx:])
@@ -242,7 +244,7 @@ class ProcessedMovieLens(Dataset):
         train_rating_idxs = torch.cat(train_rating_idxs, dim=0)
         test_rating_idxs = torch.cat(test_rating_idxs, dim=0)
         
-        return ratings[:, train_rating_idxs], ratings[:, test_rating_idxs]
+        return train_rating_idxs, test_rating_idxs
 
     def _preprocess_ratings(self, data):
         edges = data[0][('user', 'rates', 'movie')]
@@ -256,12 +258,11 @@ class ProcessedMovieLens(Dataset):
         return data
 
     def from_edges(self, indices=None):
-        edge_ratings = self.ratings
+        edge_ratings = self.processed_ratings
         movie_feats, user_feats = self.processed_data[0]["movie"]["x"], self.processed_data[0]["user"]["x"]
 
-        _, m = edge_ratings.shape
-
         if indices is None:  # if indices is not passed, take the whole graph
+            _, m = edge_ratings.shape
             indices = np.arange(m)
 
         xs, ys = self.get_unique_users(indices), self.get_unique_movies(indices)
@@ -327,10 +328,11 @@ class ProcessedMovieLens(Dataset):
         edge_ratings = self.processed_ratings
         movie_feats, user_feats = self.processed_data[0]["movie"]["x"], self.processed_data[0]["user"]["x"]
 
-        _, edge_size = edge_ratings.shape
-
-        indices = np.random.choice(np.arange(edge_size), size=(n_unique,), replace=False)
-
+        if self.train:
+            indices = np.random.choice(self.train_idxs, size=(n_unique,), replace=False)
+        else:
+            indices = np.random.choice(self.test_idxs, size=(n_unique,), replace=False)
+        
         xs, ys = self.get_unique_users(indices), self.get_unique_movies(indices)
 
         unique_xs, unique_ys = len(xs), len(ys)
