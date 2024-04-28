@@ -543,10 +543,11 @@ class Trainer(object):
         self.image_size = diffusion_model.image_size
 
         self.max_grad_norm = max_grad_norm
-
+        
+        download = Path(folder + "/processed/data.pt").exists()
         # dataset and dataloader
         self.ds = ProcessedMovieLens(folder, n_subsamples, n_unique_per_sample=self.image_size[0],
-                                     dataset_transform=rating_transform, download=True)
+                                     dataset_transform=rating_transform, download=download)
 
         dl = DataLoader(self.ds, batch_size=train_batch_size, shuffle=True, pin_memory=True, num_workers=cpu_count())
 
