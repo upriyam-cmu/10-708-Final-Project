@@ -545,14 +545,13 @@ class Trainer(object):
             ema_decay=0.995,
             adam_betas=(0.9, 0.99),
             save_and_sample_every=1000,
+            full_sample=True,
             num_samples=25,
             n_subsamples=1600,
-            min_edges_per_subsample=10,
             results_folder='./results',
             amp=False,
             mixed_precision_type='fp16',
             split_batches=True,
-            inception_block_idx=2048,
             max_grad_norm=1.,
             save_best_and_latest_only=False
     ):
@@ -575,6 +574,7 @@ class Trainer(object):
         assert has_int_squareroot(num_samples), 'number of samples must have an integer square root'
         self.num_samples = num_samples
         self.save_and_sample_every = save_and_sample_every
+        self.full_sample = full_sample
 
         self.batch_size = train_batch_size
         self.gradient_accumulate_every = gradient_accumulate_every
@@ -696,29 +696,35 @@ class Trainer(object):
                         self.ema.ema_model.eval()
 
                         with torch.inference_mode():
-                            eval_data = next(self.dl).to(device)
-                            edge_mask = eval_data[:, -1, :, :].bool()
-                            eval_data = eval_data[:, :-1, :, :]
+                            if self.full_sample:
+                                pred_graph = self.eval()
+                                print(pred_graph.shape)
+                                
+                            else:
+                                eval_data = next(self.dl).to(device)
+                                edge_mask = eval_data[:, -1, :, :].bool()
+                                eval_data = eval_data[:, :-1, :, :]
 
-                            b, c, h, w = eval_data.shape
-                            random_rating = torch.randn(b, h, w)
-                            eval_data[:, 0, :, :] = random_rating
+                                b, c, h, w = eval_data.shape
+                                random_rating = torch.randn(b, h, w)
+                                eval_data[:, 0, :, :] = random_rating
 
-                            val_loss = self.model(eval_data, edge_mask)
-                            val_sample = self.ema.ema_model.sample(eval_data)
-                            print(f"Validation Loss: {val_loss.item()}")
-                            np.save(
-                                str(self.results_folder / f"sample-{self.step}.npy"),
-                                val_sample[:, 0, :, :].cpu().detach().numpy()
-                            )
-                            self.save(self.step)
+                                val_loss = self.model(eval_data, edge_mask)
+                                val_sample = self.ema.ema_model.sample(eval_data)
+                                print(f"Validation Loss: {val_loss.item()}")
+                                np.save(
+                                    str(self.results_folder / f"sample-{self.step}.npy"),
+                                    val_sample[:, 0, :, :].cpu().detach().numpy()
+                                )
+                                self.save(self.step)
 
                 pbar.update(1)
 
         accelerator.print('training complete')
 
-    def eval(self, milestone, batch_size=16, subgraph_size=(100, 100)):
-        self.load(milestone)
+    def eval(self, milestone=None, batch_size=16, subgraph_size=(128, 128)):
+        if milestone is not None:
+            self.load(milestone)
         full_graph = self.ds.from_edges()[:-1]
         full_graph[0, :] = torch.randn_like(full_graph[0])
         full_graph = full_graph.unsqueeze(dim=0).to(self.device)
@@ -727,6 +733,7 @@ class Trainer(object):
             str(self.results_folder / f"full-graph-sample-{milestone}.npy"),
             sampled_graph[0, 0, :, :].cpu().detach().numpy()
         )
+        return sampled_graph
 
     def get_metrics(self, predicted_graph, top_ks=(1, 5, 10, 20, 30, 40, 50)):
         train_edges = self.ds.processed_ratings
