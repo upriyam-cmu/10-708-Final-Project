@@ -37,14 +37,29 @@ def toi(x):
     return x.long()
 
 
+def keep(*indices, strict=True):
+    def _filter(*args):
+        l = len(args)
+        assert not strict or -l <= min(indices) <= max(indices) < l
+        return tuple(args[i] if -l <= i < l else None for i in indices)
+
+    return _filter
+
+
 class pipe:
     extract = None
 
-    def __init__(self, x: any):
-        self.value = x.value if type(x) == pipe else x
+    def __init__(self, *x):
+        self.value = tuple(v.value if type(v) == pipe else v for v in x)
 
     def __or__(self, fn):
-        return self.value if fn is None else pipe(fn(self.value))
+        if fn is None:
+            if len(self.value) > 1:
+                return self.value
+            if len(self.value) == 1:
+                return self.value[0]
+            return None
+        return pipe(fn(*self.value))
 
 
 def T(x):
@@ -65,7 +80,7 @@ def get_kwargs(kwargs, **defaults):
 class MovieLensFeatureEmb(nn.Module):
     MAX_N_GENRES = 6
 
-    def __init__(self, age_dim=4, gender_dim=3, occupation_dim=8, genre_dim=16, add_genres=True):
+    def __init__(self, age_dim=4, gender_dim=4, occupation_dim=8, genre_dim=16, add_genres=True):
         # NB: embed_dim should be even
         super().__init__()
 
@@ -215,8 +230,8 @@ class SubgraphAttnModel(nn.Module):
             t, t2 = tuple(block_time_embeds_1.chunk(8, dim=1)), block_time_embeds_2
 
             subgraph = pipe(subgraph) | block["layer_norm_1"] | modulate(t[0], t[1]) | pipe.extract
-            row_attn = pipe(subgraph) | block["row_attn"] | modulate(t[2]) | pipe.extract
-            col_attn = pipe(subgraph) | T | block["col_attn"] | T | modulate(t[3]) | pipe.extract
+            row_attn = pipe(subgraph, mask) | block["row_attn"] | modulate(t[2]) | pipe.extract
+            col_attn = pipe(T(subgraph), mask) | block["col_attn"] | T | modulate(t[3]) | pipe.extract
             merged = torch.cat([row_attn + 0.5 * subgraph, col_attn + 0.5 * subgraph], dim=1)
             normed = pipe(merged) | block["layer_norm_2"] | modulate(t[4:6], t[6:8]) | pipe.extract
             projected = pipe(normed) | block["feed_forward"] | modulate(t2) | pipe.extract
@@ -244,11 +259,11 @@ class GraphReconstructionModel(nn.Module):
             embed,
             SubgraphAttnModel(
                 embed.embed_dim, [],
-                SinusoidalPosEmb(embed.embed_dim)
+                SinusoidalPosEmb(embed.embed_dim + embed.embed_dim % 2)
             )
         )
 
 
 if __name__ == '__main__':
     model = GraphReconstructionModel.default()
-    model(torch.rand(1, 10, 8, 9), torch.tensor([1]))
+    model(torch.rand(1, 10, 8, 9), torch.tensor([1]), None)
