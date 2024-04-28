@@ -216,7 +216,8 @@ class ProcessedMovieLens(Dataset):
         if download:
             self.raw = dataset_class(root, force_reload=True)
             self.raw.process()
-
+        
+        self.test = test
         self.n_unique_per_sample = n_unique_per_sample
         self.n_subsamples = n_subsamples
         self.transform = transform
