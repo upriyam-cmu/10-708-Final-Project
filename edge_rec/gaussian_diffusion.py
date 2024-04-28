@@ -14,6 +14,8 @@ from torch.utils.data import DataLoader
 
 from torch.optim import Adam
 
+from sklearn.metrics import ndcg_score
+
 from einops import rearrange, reduce
 from tqdm.auto import tqdm
 from ema_pytorch import EMA
@@ -726,3 +728,46 @@ class Trainer(object):
             str(self.results_folder / f"full-graph-sample-{milestone}.npy"),
             sampled_graph[0, 0, :, :].cpu().detach().numpy()
         )
+
+    def get_metrics(self, predicted_graph, top_ks=(1, 5, 10, 20, 30, 40, 50)):
+        train_edges = self.ds.processed_ratings
+        pred_graph = predicted_graph.cpu().detach()
+        pred_graph[train_edges[0], train_edges[1]] = float('-inf')
+        ranked = torch.argsort(pred_graph, dim=1, descending=True)
+
+        test_edges = self.ds.test_ratings
+        test_graph = torch.zeros_like(pred_graph)
+        test_graph[test_edges[0], test_edges[1]] = test_edges[2]
+
+        precision = torch.zeros(len(top_ks))
+        recall = torch.zeros_like(precision)
+        mean_reciprocal_rank = torch.zeros_like(precision)
+        hit_rate = torch.zeros_like(precision)
+        ndcg = torch.zeros_like(precision)
+
+        for user in range(predicted_graph.shape[0]):
+            pred_rankings = ranked[user]
+            test_movies = test_edges[1][test_edges[0] == user]
+            test_ratings = test_edges[2][test_edges[0] == user].argsort(descending=True)
+            true_rankings = test_movies[test_ratings]
+
+            for i, k in enumerate(top_ks):
+                isin = torch.isin(pred_rankings[:k], true_rankings)
+                hits = torch.sum(isin)
+                precision[i] += hits / k
+                recall[i] += hits / true_rankings.shape[0]
+                mean_reciprocal_rank[i] += 1 / (torch.where(isin)[0][0] + 1)
+                hit_rate[i] += 1 if hits > 0 else 0
+
+        for i, k in enumerate(top_ks):
+            ndcg[i] = ndcg_score(test_graph, pred_graph, k=k)
+
+        metrics = {
+            'precision': precision / predicted_graph.shape[0],
+            'recall': recall / predicted_graph.shape[0],
+            'mean_reciprocal_rank': mean_reciprocal_rank / predicted_graph.shape[0],
+            'hit_rate': hit_rate / predicted_graph.shape[0],
+            'ndcg': ndcg
+        }
+
+        return metrics
