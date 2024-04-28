@@ -472,6 +472,9 @@ class GaussianDiffusion(nn.Module):
         else:
             raise ValueError(f'unknown objective {self.objective}')
         
+        if edge_mask is not None:
+            target[~edge_mask] = 0
+
         loss = F.mse_loss(model_out, target, reduction='none')
         loss = reduce(loss, 'b ... -> b', 'mean')
 

@@ -168,6 +168,8 @@ class Attention(nn.Module):
 
         qkv = self.to_qkv(x).chunk(3, dim=1)
         q, k, v = map(lambda t: rearrange(t, 'b (h c) x y -> (b y) h x c', h=self.heads), qkv)
+        if exists(m):
+            m = rearrange(m, 'b x y -> (b y) 1 x 1')
 
         mk, mv = map(lambda t: repeat(t, 'h n d -> b h n d', b=b * w), self.mem_kv)
         k, v = map(partial(torch.cat, dim=-2), ((mk, k), (mv, v)))
