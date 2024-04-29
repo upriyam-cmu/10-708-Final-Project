@@ -3,7 +3,7 @@ import pandas as pd
 from pathlib import Path
 
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import IterableDataset
 from torch_geometric.datasets import MovieLens1M, MovieLens100K
 
 from torch_geometric.data import HeteroData
@@ -408,7 +408,7 @@ class CoreMovieLensDataset:
         return torch.cat([ratings, movies, users, mask], dim=0)
 
 
-class MovieLensDatasetWrapper(Dataset):
+class MovieLensDatasetWrapper(IterableDataset):
     def __init__(self, dataset: CoreMovieLensDataset, subgraph_size, target_density: float,
                  train: bool, n_subsamples: int, batch_size: int):
         self.dataset = dataset
@@ -426,14 +426,11 @@ class MovieLensDatasetWrapper(Dataset):
             include_test_edges=not self.train
         )
 
-    def __next__(self):
-        return torch.stack([
-            self.__getitem__()
-            for _ in range(self.batch_size)
-        ], dim=0)
+    def __iter__(self):
+        return self
 
-    def __len__(self):
-        return self.n_subsamples
+    def __next__(self):
+        return self.__getitem__()
 
     def build_feat_graph(self):
         return self.dataset.get_subgraph(
@@ -444,7 +441,7 @@ class MovieLensDatasetWrapper(Dataset):
         )[:-1]  # drop mask
 
 
-class ProcessedMovieLens(Dataset):
+class ProcessedMovieLens(IterableDataset):
     PROCESSED_ML_SUBPATH = "/processed/data.pt"
 
     def __init__(self, root, ml_100k=True, n_subsamples=10000, n_unique_per_sample=10,
@@ -590,7 +587,7 @@ class ProcessedMovieLens(Dataset):
             indices = np.arange(m)
         return edge_ratings[1, indices].unique()
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx=None):
         n_unique = self.n_unique_per_sample
         edge_ratings = self.processed_ratings
         movie_feats, user_feats = self.processed_data[0]["movie"]["x"], self.processed_data[0]["user"]["x"]
@@ -635,16 +632,22 @@ class ProcessedMovieLens(Dataset):
 
         return out
 
-    def __len__(self):
-        return self.n_subsamples
+    def __next__(self):
+        return self.__getitem__()
+
+    def __iter__(self):
+        return self
 
 
-class FullGraphSampler(Dataset):
+class FullGraphSampler(IterableDataset):
     def __init__(self, ds):
         self.ds = ds
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx=None):
         return self.ds.build_feat_graph(transform_ratings=True, include_mask=True)
 
-    def __len__(self):
-        return 1
+    def __next__(self):
+        return self.__getitem__()
+
+    def __iter__(self):
+        return self

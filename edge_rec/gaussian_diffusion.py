@@ -629,7 +629,7 @@ class Trainer(object):
         dl = DataLoader(
             self.ds,
             batch_size=train_batch_size,
-            shuffle=True,
+            shuffle=False,
             pin_memory=True,
             num_workers=cpu_count()
         )
@@ -639,7 +639,7 @@ class Trainer(object):
         test_dl = DataLoader(
             self.test_ds,
             batch_size=train_batch_size,
-            shuffle=True,
+            shuffle=False,
             pin_memory=True,
             num_workers=cpu_count()
         )
