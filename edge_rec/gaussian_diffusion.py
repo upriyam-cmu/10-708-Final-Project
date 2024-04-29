@@ -22,7 +22,8 @@ from ema_pytorch import EMA
 
 from accelerate import Accelerator
 
-from edge_rec.movie_lens_dataset import ProcessedMovieLens, FullGraphSampler
+from edge_rec.movie_lens_dataset import ProcessedMovieLens, FullGraphSampler, \
+    CoreMovieLensDataset, MovieLensDatasetWrapper
 
 ModelPrediction = namedtuple('ModelPrediction', ['pred_noise', 'pred_x_start'])
 
@@ -371,7 +372,7 @@ class GaussianDiffusion(nn.Module):
         img = x_start
         imgs = [img]
 
-        tqdm2 = (lambda x, *y, **z: x) if sample_full_params is None else tqdm
+        tqdm2 = (lambda x, *y, **z: x)  # if sample_full_params is None else tqdm
         for t in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step', total=self.num_timesteps):
             subsampler, n_subsamples = self._subsample_img(img, sample_full_params)
             for sub_img, ind_map in tqdm2(subsampler(), desc='subsampling loop', total=n_subsamples):
@@ -401,6 +402,7 @@ class GaussianDiffusion(nn.Module):
         img = x_start
         imgs = [img]
 
+        tqdm2 = (lambda x, *y, **z: x)  # if sample_full_params is None else tqdm
         for time, time_next in tqdm(time_pairs, desc='sampling loop time step'):
             if time_next < 0:
                 img = x_start
@@ -415,7 +417,7 @@ class GaussianDiffusion(nn.Module):
             scaled_x_start = x_start * alpha_next.sqrt()
 
             subsampler, n_subsamples = self._subsample_img(img, sample_full_params)
-            for sub_img, ind_map in tqdm(subsampler(), desc='subsampling loop', total=n_subsamples):
+            for sub_img, ind_map in tqdm2(subsampler(), desc='subsampling loop', total=n_subsamples):
                 pred_noise, _, *_ = self.model_predictions(
                     sub_img, time_cond,
                     clip_x_start=True, rederive_pred_noise=True
@@ -556,7 +558,8 @@ class Trainer(object):
             split_batches=True,
             max_grad_norm=1.,
             save_best_and_latest_only=False,
-            train_on_full_graph=False
+            train_on_full_graph=False,
+            use_alternate_dense_dataset=False
     ):
         super().__init__()
 
@@ -593,24 +596,53 @@ class Trainer(object):
 
         self.max_grad_norm = max_grad_norm
 
-        download = not Path(folder + "/processed/data.pt").exists()
-        # dataset and dataloader
-        ds = ProcessedMovieLens(folder, n_subsamples, n_unique_per_sample=self.image_size[0], download=download)
-        self.ds = FullGraphSampler(ds) if train_on_full_graph else ds
+        if use_alternate_dense_dataset:
+            core_dataset = CoreMovieLensDataset(folder)
+            subgraph_size, target_density = diffusion_model.image_size, 0.7
+            self.ds = MovieLensDatasetWrapper(
+                core_dataset,
+                subgraph_size,
+                target_density,
+                train=True,
+                n_subsamples=n_subsamples,
+                batch_size=train_batch_size,
+            )
+            self.test_ds = MovieLensDatasetWrapper(
+                core_dataset,
+                subgraph_size,
+                target_density,
+                train=False,
+                n_subsamples=n_subsamples,
+                batch_size=train_batch_size,
+            )
+        else:
+            download = not Path(folder + "/processed/data.pt").exists()
+            # dataset and dataloader
+            ds = ProcessedMovieLens(folder, n_subsamples, n_unique_per_sample=self.image_size[0], download=download)
+            self.ds = FullGraphSampler(ds) if train_on_full_graph else ds
 
-        dl = DataLoader(self.ds, batch_size=train_batch_size, shuffle=True, pin_memory=True, num_workers=cpu_count())
+            # test dataset and dataloader
+            test_ds = ProcessedMovieLens(folder, n_subsamples, n_unique_per_sample=self.image_size[0],
+                                         download=download, train=False)
+            self.test_ds = FullGraphSampler(test_ds) if train_on_full_graph else test_ds
 
+        dl = DataLoader(
+            self.ds,
+            batch_size=train_batch_size,
+            shuffle=True,
+            pin_memory=True,
+            num_workers=cpu_count()
+        )
         dl = self.accelerator.prepare(dl)
         self.dl = cycle(dl)
 
-        # test dataset and dataloader
-        test_ds = ProcessedMovieLens(folder, n_subsamples, n_unique_per_sample=self.image_size[0],
-                                     download=download, train=False)
-        self.test_ds = FullGraphSampler(test_ds) if train_on_full_graph else test_ds
-
-        test_dl = DataLoader(self.test_ds, batch_size=train_batch_size, shuffle=True, pin_memory=True,
-                             num_workers=cpu_count())
-
+        test_dl = DataLoader(
+            self.test_ds,
+            batch_size=train_batch_size,
+            shuffle=True,
+            pin_memory=True,
+            num_workers=cpu_count()
+        )
         test_dl = self.accelerator.prepare(test_dl)
         self.test_dl = cycle(test_dl)
 
@@ -739,7 +771,8 @@ class Trainer(object):
     def eval(self, milestone=None, batch_size=16, subgraph_size=(128, 128)):
         if milestone is not None:
             self.load(milestone)
-        full_graph = self.ds.from_edges()[:-1]
+        full_graph = self.ds.build_feat_graph()
+        print(full_graph.shape)
         full_graph[0, :] = torch.randn_like(full_graph[0])
         full_graph = full_graph.unsqueeze(dim=0).to(self.device)
         sampled_graph = self.ema.ema_model.sample_full(full_graph, batch_size, subgraph_size)

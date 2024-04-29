@@ -8,6 +8,8 @@ import torch.nn.functional as F
 
 from einops import rearrange, repeat
 
+from edge_rec.pipe import *
+
 # constants
 
 AttentionConfig = namedtuple('AttentionConfig', ['enable_flash', 'enable_math', 'enable_mem_efficient'])
@@ -146,7 +148,59 @@ class Attend(nn.Module):
         return out
 
 
-class Attention(nn.Module):
+class AttentionBase(nn.Module):
+    def __init__(
+            self,
+            d_qk, d_v,
+            heads=4,
+            dim_head=32,
+            num_mem_kv=4,
+            flash=False
+    ):
+        super().__init__()
+        self.heads = heads
+        hidden_dim = dim_head * heads
+        self.out_dim = d_v
+
+        self.attend = Attend(flash=flash)
+
+        self.mem_mask = nn.Parameter(torch.ones(1, 1, num_mem_kv).bool(), requires_grad=False)
+        self.mem_kv = nn.Parameter(torch.randn(2, heads, num_mem_kv, dim_head))
+        self.to_q = nn.Conv2d(d_qk, hidden_dim, 1, bias=False)
+        self.to_k = nn.Conv2d(d_qk, hidden_dim, 1, bias=False)
+        self.to_v = nn.Conv2d(d_v, hidden_dim, 1, bias=False)
+        self.to_out = nn.Conv2d(hidden_dim, d_v, 1)
+
+    def forward(self, q, k, v, mask=None):
+        bq, cq, nq, mq = q.shape
+        bk, ck, nk, mk = k.shape
+        bv, cv, nv, mv = v.shape
+
+        assert bq == bk == bv
+        assert cq == ck
+        assert nq == nk == nv
+        assert mq == mk == mv
+
+        b, c, x, y = v.shape
+
+        q, k, v = self.to_q(q), self.to_k(k), self.to_v(v)
+        q, k, v = map(lambda t: rearrange(t, 'b (h f) x y -> (b y) h x f', h=self.heads), (q, k, v))
+        if exists(mask):
+            assert mask.shape == (b, x, y)
+            mem_mask = repeat(self.mem_mask, 'h n d -> b h n d', b=b * y)
+            mask = rearrange(mask, 'b x y -> (b y) 1 1 x')
+            mask = torch.cat((mem_mask, mask), dim=-1)
+
+        mk, mv = map(lambda t: repeat(t, 'h n d -> b h n d', b=b * y), self.mem_kv)
+        k, v = map(partial(torch.cat, dim=-2), ((mk, k), (mv, v)))
+
+        out = self.attend(q, k, v, mask)
+
+        out = rearrange(out, '(b y) h x d -> b (h d) x y', b=b)
+        return self.to_out(out)
+
+
+class SelfAttention(nn.Module):
     def __init__(
             self,
             dim,
@@ -156,30 +210,63 @@ class Attention(nn.Module):
             flash=False
     ):
         super().__init__()
-        self.heads = heads
-        hidden_dim = dim_head * heads
-
-        self.attend = Attend(flash=flash)
-
-        self.mem_mask = nn.Parameter(torch.ones(1, 1, num_mem_kv).bool(), requires_grad=False)
-        self.mem_kv = nn.Parameter(torch.randn(2, heads, num_mem_kv, dim_head))
-        self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, 1, bias=False)
-        self.to_out = nn.Conv2d(hidden_dim, dim, 1)
+        self.attn = AttentionBase(
+            d_qk=dim,
+            d_v=dim,
+            heads=heads,
+            dim_head=dim_head,
+            num_mem_kv=num_mem_kv,
+            flash=flash
+        )
 
     def forward(self, x, mask=None):
-        b, c, n, m = x.shape
+        return self.attn(x, x, x, mask=mask)
 
-        qkv = self.to_qkv(x).chunk(3, dim=1)
-        q, k, v = map(lambda t: rearrange(t, 'b (h c) x y -> (b y) h x c', h=self.heads), qkv)
-        if exists(mask):
-            mem_mask = repeat(self.mem_mask, 'h n d -> b h n d', b=b * m)
-            mask = rearrange(mask, 'b x y -> (b y) 1 1 x')
-            mask = torch.cat((mem_mask, mask), dim=-1)
+    @property
+    def out_dim(self):
+        return self.attn.out_dim
 
-        mk, mv = map(lambda t: repeat(t, 'h n d -> b h n d', b=b * m), self.mem_kv)
-        k, v = map(partial(torch.cat, dim=-2), ((mk, k), (mv, v)))
 
-        out = self.attend(q, k, v, mask)
+class CrossAttention(nn.Module):
+    def __init__(
+            self,
+            d_qk, d_v,
+            heads=4,
+            dim_head=32,
+            num_mem_kv=4,
+            flash=False
+    ):
+        super().__init__()
+        self.attn = AttentionBase(
+            d_qk=d_qk,
+            d_v=d_v,
+            heads=heads,
+            dim_head=dim_head,
+            num_mem_kv=num_mem_kv,
+            flash=flash
+        )
 
-        out = rearrange(out, '(b y) h x d -> b (h d) x y', b=b)
-        return self.to_out(out)
+    def forward(self, qk, v, mask=None):
+        return self.attn(qk, qk, v, mask=mask)
+
+    @property
+    def out_dim(self):
+        return self.attn.out_dim
+
+
+class Stacked1DAttention(nn.Module):
+    def __init__(self, attn, *args, **kwargs):
+        super().__init__()
+        self.attn = attn(*args, **kwargs) if len(args) + len(kwargs) > 0 else attn
+        self.reduce = nn.Conv2d(2 * self.attn.out_dim, self.attn.out_dim, 1, bias=False)
+
+    def forward(self, *tensors, **kwargs):
+        """
+        Given all tensor arguments of attention (shape=(b, f, n, m)),
+        do attn row/col wise independently, then stack results.
+        """
+        attn = partial(self.attn, **kwargs)
+        row_attn = pipe(*tensors) | attn | pipe.extract
+        col_attn = pipe(*tensors) | forall(T) | attn | forall(T) | pipe.extract
+        merged = torch.cat([row_attn, col_attn], dim=1)
+        return self.reduce(merged)

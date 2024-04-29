@@ -270,6 +270,31 @@ class CoreMovieLensDataset:
             test_split=test_split
         )
 
+        self.top_users, self.top_movies = self._build_density_scores(self.all_edges, self.n_users, self.n_movies)
+
+    @staticmethod
+    def _build_density_scores(all_edges, n_users, n_movies):
+        movie_stats = [set() for _ in range(n_movies)]
+        user_stats = [set() for _ in range(n_users)]
+        for user, movie in all_edges[0]:
+            movie_stats[movie].add(user)
+            user_stats[user].add(movie)
+        assert len(user_stats) == n_users and len(movie_stats) == n_movies
+
+        user_scores = np.array([
+            sum(len(movie_stats[movie]) for movie in movies)
+            for user, movies in enumerate(user_stats)
+        ])
+        movie_scores = np.array([
+            sum(len(user_stats[user]) for user in users)
+            for movie, users in enumerate(movie_stats)
+        ])
+
+        top_users = np.argsort(user_scores)[::-1]
+        top_movies = np.argsort(movie_scores)[::-1]
+
+        return top_users, top_movies
+
     @staticmethod
     def _split_edges(edge_inds: torch.Tensor, edge_ratings: torch.Tensor, test_split: float):
         n_edges = len(edge_ratings)
@@ -321,7 +346,8 @@ class CoreMovieLensDataset:
                 sliced[user_id_to_ind[user_id], movie_id_to_ind[movie_id]] = rating
         return sliced
 
-    def get_subgraph(self, subgraph_size, assert_density, include_train_edges=True, include_test_edges=True):
+    def get_subgraph(self, subgraph_size, target_density,
+                     include_train_edges=True, include_test_edges=True, *, debug=False):
         if subgraph_size is None:
             subgraph_size = (self.n_users, self.n_movies)
         else:
@@ -334,47 +360,88 @@ class CoreMovieLensDataset:
         assert len(subgraph_size) == 2 and all(type(sz) == int for sz in subgraph_size), f"size={subgraph_size}"
         n_users_sampled, n_movies_sampled = subgraph_size
 
-        assert include_train_edges or include_test_edges
+        assert include_train_edges or include_test_edges, "Must include at least one of train/test edges"
         if include_train_edges and include_test_edges:
             edges = self.all_edges
         else:
             edges = self.train_edges if include_train_edges else self.test_edges
 
-        if not assert_density:
+        if target_density is None:
             user_inds = np.random.choice(self.n_users, n_users_sampled, replace=False)
             movie_inds = np.random.choice(self.n_movies, n_movies_sampled, replace=False)
         else:
-            raise NotImplementedError("currently cannot assert density of subgraph")
+            slice_point = round((target_density ** (-1 / 2.25) - 1) * 500)
+            assert slice_point >= n_users_sampled and slice_point >= n_movies_sampled, \
+                "Desired density too high for desired subgraph size"
 
-            # indices = edges[0]
-            #
-            # user_inds, movie_inds = set(), set()
-            # n_users_remaining, n_movies_remaining = n_users_sampled, n_movies_sampled
-            #
-            # while min(n_users_remaining, n_movies_remaining) > 0:
-            #     assert indices[:, 0].unique() >= n_users_remaining and indices[:, 1].unique() >= n_movies_remaining, \
-            #         "Subgraph is too large to guarantee that minimum density is preserved"
-            #
-            #     mask_inds = np.random.choice(len(indices), min(n_users_remaining, n_movies_remaining), replace=False)
-            #     chosen_mask = np.ones(len(indices), dtype=bool)[mask_inds]
-            #     new_users, new_movies = set(indices[chosen_mask, 0]), set(indices[chosen_mask, 1])
-            #     user_inds.update(new_users)
-            #     movie_inds.update(new_movies)
-            #     indices = indices[~chosen_mask]
-            #
-            # assert indices[:, 0].unique() >= n_users_remaining and indices[:, 1].unique() >= n_movies_remaining, \
-            #     "Subgraph is too large to guarantee that minimum density is preserved"
-            #
-            # assert len(user_inds) == n_users_sampled and len(movie_inds) == n_movies_sampled
+            random_weights = ((np.arange(slice_point)[::-1] + 1) / 500 + 1) ** -2.25
+            random_weights = random_weights / random_weights.sum()
+
+            user_inds = np.random.choice(
+                self.top_users[:slice_point],
+                size=n_users_sampled,
+                replace=False,
+                p=random_weights
+            )
+            movie_inds = np.random.choice(
+                self.top_movies[:slice_point],
+                size=n_movies_sampled,
+                replace=False,
+                p=random_weights
+            )
+
+            if debug:
+                print("Density:", sum(
+                    1
+                    for user, movie in edges[0]
+                    if user in user_inds and movie in movie_inds
+                ) / (n_users_sampled * n_movies_sampled))
 
         users, movies = self.user_data[user_inds], self.movie_data[movie_inds]
-        ratings = self._slice_edges(edges, user_inds, movie_inds)
+        ratings = self._slice_edges(edges, user_inds, movie_inds).unsqueeze(dim=0)  # shape = (1, n, m)
 
-        ratings = (2 * (ratings.float() - 3) / 5).unsqueeze(dim=0)  # shape = (1, n, m)
+        mask = (ratings != 0).float()
+        ratings = (2 * (ratings.float() - 3) / 5) * mask  # re-mask missing entries to 0 post-transformation
         users = repeat(users, 'n f -> f n m', m=n_movies_sampled).float()
         movies = repeat(movies, 'm f -> f n m', n=n_users_sampled).float()
 
-        return torch.cat([ratings, movies, users], dim=0)
+        return torch.cat([ratings, movies, users, mask], dim=0)
+
+
+class MovieLensDatasetWrapper(Dataset):
+    def __init__(self, dataset: CoreMovieLensDataset, subgraph_size, target_density: float,
+                 train: bool, n_subsamples: int, batch_size: int):
+        self.dataset = dataset
+        self.subgraph_size = subgraph_size
+        self.target_density = target_density
+        self.train = train
+        self.n_subsamples = n_subsamples
+        self.batch_size = batch_size
+
+    def __getitem__(self, idx=None):
+        return self.dataset.get_subgraph(
+            subgraph_size=self.subgraph_size,
+            target_density=self.target_density,
+            include_train_edges=self.train,
+            include_test_edges=not self.train
+        )
+
+    def __next__(self):
+        return torch.stack([
+            self.__getitem__()
+            for _ in range(self.batch_size)
+        ], dim=0)
+
+    def __len__(self):
+        return self.n_subsamples
+
+    def build_feat_graph(self):
+        return self.dataset.get_subgraph(
+            subgraph_size=None,
+            target_density=None,
+            include_train_edges=True,
+            include_test_edges=True
+        )[:-1]  # drop mask
 
 
 class ProcessedMovieLens(Dataset):
