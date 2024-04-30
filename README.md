@@ -9,4 +9,4 @@ We train and evaluate the model on the [ML-100k dataset](https://grouplens.org/d
 We train on 1000 diffusion steps for 10000 iterations on a single A100 GPU in the Google Colab environment with batch size 16, patch size 50. 
 
 ### Replicability
-Results can be replicated in a step-by-step fashion by running the [execute.ipynb](https://github.com/upriyam-cmu/10-708-Final-Project/blob/main/execute.ipynb) notebook.
+Results can be replicated in a step-by-step fashion by running the [execute.ipynb](./execute.ipynb) notebook.
