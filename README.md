@@ -5,4 +5,4 @@ This is the official repository of "EDGE-Rec: Efficient and Data-Guided Edge Dif
 
 ### Replicability
 We train for 10000 iterations on a single A100 GPU in the Google Colab environment with batch size 16.
-Results can be replicated step-by-step by running the [execute.ipynb](https://github.com/upriyam-cmu/10-708-Final-Project/blob/main/execute.ipynb) notebook.
+Results can be replicated in a step-by-step fashion by running the [execute.ipynb](https://github.com/upriyam-cmu/10-708-Final-Project/blob/main/execute.ipynb) notebook.
