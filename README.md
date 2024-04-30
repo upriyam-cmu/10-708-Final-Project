@@ -5,5 +5,6 @@ This is the official repository of "EDGE-Rec: Efficient and Data-Guided Edge Dif
 
 ### Replicability
 We train and evaluate the model on the [ML-100k dataset](https://grouplens.org/datasets/movielens/100k/). We construct a custom 90-10 train-test split of the edges by adopting a stratified sampling approach to ensure that each user is represented in both the training and validation split.
-We on 1000 diffusion steps for 10000 iterations on a single A100 GPU in the Google Colab environment with batch size 16 and patch size 50. 
+
+We train on 1000 diffusion steps for 10000 iterations on a single A100 GPU in the Google Colab environment with batch size 16 and patch size 50. 
 Results can be replicated in a step-by-step fashion by running the [execute.ipynb](https://github.com/upriyam-cmu/10-708-Final-Project/blob/main/execute.ipynb) notebook.
