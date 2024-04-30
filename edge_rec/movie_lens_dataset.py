@@ -141,14 +141,8 @@ class RawMovieLens1M(MovieLens1M):
     def __init__(self, root, transform=None, pre_transform=None, force_reload=False):
         super(RawMovieLens1M, self).__init__(root, transform, pre_transform, force_reload)
 
-    def _bucket_ages(self, df):
-        bins = [0, 18, 25, 35, 45, 50, 56, 200]
-        labels = [0, 1, 2, 3, 4, 5, 6]
-        df["age"] = pd.cut(df["age"], bins=bins, labels=labels)
-        return df
-
     def _process_genres(self, df):
-        l = df[self.MOVIE_HEADERS[6:]].values
+        l = df["genres"].str.get_dummies('|').values
         max_genres = l.sum(axis=1).max()
         idx_list = []
         for i in range(l.shape[0]):
@@ -167,31 +161,34 @@ class RawMovieLens1M(MovieLens1M):
         # Process movie data:
         df = pd.read_csv(
             self.raw_paths[0],
-            sep='|',
+            sep='::',
             header=None,
-            names=self.MOVIE_HEADERS,
             index_col='movieId',
+            names=self.MOVIE_HEADERS,
             encoding='ISO-8859-1',
+            engine='python',
         )
         movie_mapping = {idx: i for i, idx in enumerate(df.index)}
 
-        x = self._process_genres(df)
-        data['movie'].x = torch.from_numpy(x).to(torch.float)
+        genres = self._process_genres(df)
+        genres = torch.from_numpy(genres).to(torch.float)
 
-        self.df = x
+        data['movie'].x = genres
 
         # Process user data:
         df = pd.read_csv(
             self.raw_paths[1],
-            sep='|',
+            sep='::',
             header=None,
-            names=self.USER_HEADERS,
             index_col='userId',
+            names=self.USER_HEADERS,
+            dtype='str',
             encoding='ISO-8859-1',
+            engine='python',
         )
         user_mapping = {idx: i for i, idx in enumerate(df.index)}
 
-        age = self._bucket_ages(df)["age"].to_numpy()[:, None]
+        age = df['age'].str.get_dummies().values.argmax(axis=1)[:, None]
         age = torch.from_numpy(age).to(torch.float)
 
         gender = df['gender'].str.get_dummies().values[:, 0][:, None]
@@ -202,12 +199,16 @@ class RawMovieLens1M(MovieLens1M):
 
         data['user'].x = torch.cat([age, gender, occupation], dim=-1)
 
-        # Process rating data for training:
+        self.int_user_data = df
+
+        # Process rating data:
         df = pd.read_csv(
             self.raw_paths[2],
-            sep='\t',
+            sep='::',
             header=None,
             names=self.RATING_HEADERS,
+            encoding='ISO-8859-1',
+            engine='python',
         )
 
         src = [user_mapping[idx] for idx in df['userId']]
@@ -224,22 +225,6 @@ class RawMovieLens1M(MovieLens1M):
         data['movie', 'rated_by', 'user'].edge_index = edge_index.flip([0])
         data['movie', 'rated_by', 'user'].rating = rating
         data['movie', 'rated_by', 'user'].time = time
-
-        # Process rating data for testing:
-        df = pd.read_csv(
-            self.raw_paths[3],
-            sep='\t',
-            header=None,
-            names=self.RATING_HEADERS,
-        )
-
-        src = [user_mapping[idx] for idx in df['userId']]
-        dst = [movie_mapping[idx] for idx in df['movieId']]
-        edge_label_index = torch.tensor([src, dst])
-        data['user', 'rates', 'movie'].edge_label_index = edge_label_index
-
-        edge_label = torch.from_numpy(df['rating'].values).to(torch.float)
-        data['user', 'rates', 'movie'].edge_label = edge_label
 
         if self.pre_transform is not None:
             data = self.pre_transform(data)
