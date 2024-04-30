@@ -768,11 +768,11 @@ class Trainer(object):
 
         accelerator.print('training complete')
 
-    def eval(self, milestone=None, batch_size=16, subgraph_size=(128, 128)):
+    def eval(self, milestone=None, full_graph=None, batch_size=16, subgraph_size=(128, 128)):
         if milestone is not None:
             self.load(milestone)
-        full_graph = self.ds.build_feat_graph()
-        print(full_graph.shape)
+        if full_graph is None:
+            full_graph = self.ds.build_feat_graph()
         full_graph[0, :] = torch.randn_like(full_graph[0])
         full_graph = full_graph.unsqueeze(dim=0).to(self.device)
         sampled_graph = self.ema.ema_model.sample_full(full_graph, batch_size, subgraph_size)

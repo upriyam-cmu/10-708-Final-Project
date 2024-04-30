@@ -347,7 +347,8 @@ class CoreMovieLensDataset:
         return sliced
 
     def get_subgraph(self, subgraph_size, target_density,
-                     include_train_edges=True, include_test_edges=True, *, debug=False):
+                     include_train_edges=True, include_test_edges=True,
+                     *, include_separate_train_test_ratings=False, debug=False):
         if subgraph_size is None:
             subgraph_size = (self.n_users, self.n_movies)
         else:
@@ -405,7 +406,12 @@ class CoreMovieLensDataset:
         users = repeat(users, 'n f -> f n m', m=n_movies_sampled).float()
         movies = repeat(movies, 'm f -> f n m', n=n_users_sampled).float()
 
-        return torch.cat([ratings, movies, users, mask], dim=0)
+        ret = torch.cat([ratings, movies, users, mask], dim=0)
+        if include_separate_train_test_ratings:
+            train_ratings = self._slice_edges(self.train_edges, user_inds, movie_inds)
+            test_ratings = self._slice_edges(self.test_edges, user_inds, movie_inds)
+            ret = ret, train_ratings, test_ratings
+        return ret
 
 
 class MovieLensDatasetWrapper(IterableDataset):
