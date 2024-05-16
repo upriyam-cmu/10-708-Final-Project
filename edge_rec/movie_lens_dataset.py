@@ -255,6 +255,8 @@ class CoreMovieLensDataset:
             test_split=test_split
         )
 
+        (self.user_train_review_count, self.user_all_review_count), (self.movie_train_review_count, self.movie_all_review_count) = self._build_review_count()
+
         self.top_users, self.top_movies = self._build_density_scores(self.all_edges, self.n_users, self.n_movies)
 
     @staticmethod
@@ -318,6 +320,19 @@ class CoreMovieLensDataset:
         return torch.stack(movie_genres)
 
     @staticmethod
+    def _count_unique(edges, col, n_unique):
+        count = torch.tensor(np.column_stack(np.unique(edges[0][:,col], axis=0, return_counts=True)))
+        out = torch.zeros(n_unique)
+        out[count[:,0]] = count[:,1].float()
+        return out
+
+    def _build_review_count(self):
+        edge_sets = [self.train_edges, self.all_edges]
+        user_edge_count = [self._count_unique(edges, 0, self.n_users) for edges in edge_sets]
+        movie_edge_count = [self._count_unique(edges, 1, self.n_movies) for edges in edge_sets]
+        return user_edge_count, movie_edge_count
+
+    @staticmethod
     def _slice_edges(edges, user_inds, movie_inds) -> torch.Tensor:
         n_users_sampled, n_movies_sampled = len(user_inds), len(movie_inds)
         user_id_to_ind = {user_id: idx for idx, user_id in enumerate(user_inds)}
@@ -333,7 +348,7 @@ class CoreMovieLensDataset:
 
     def get_subgraph(self, subgraph_size, target_density,
                      include_train_edges=True, include_test_edges=True,
-                     *, include_separate_train_test_ratings=False, debug=False):
+                     *, include_separate_train_test_ratings=False, include_review_count_feats=False, debug=False):
         if subgraph_size is None:
             subgraph_size = (self.n_users, self.n_movies)
         else:
@@ -349,8 +364,15 @@ class CoreMovieLensDataset:
         assert include_train_edges or include_test_edges, "Must include at least one of train/test edges"
         if include_train_edges and include_test_edges:
             edges = self.all_edges
+            user_review_counts, movie_review_counts = self.user_all_review_count, self.movie_all_review_count
         else:
             edges = self.train_edges if include_train_edges else self.test_edges
+            user_review_counts, movie_review_counts = self.user_train_review_count, self.movie_train_review_count
+
+        user_data, movie_data = self.user_data, self.movie_data
+        if include_review_count_feats:
+            user_data = torch.cat([user_data, user_review_counts.reshape(-1,1)], axis=1)
+            movie_data = torch.cat([movie_data, movie_review_counts.reshape(-1,1)], axis=1)
 
         if target_density is None:
             user_inds = np.random.choice(self.n_users, n_users_sampled, replace=False)
@@ -383,7 +405,7 @@ class CoreMovieLensDataset:
                     if user in user_inds and movie in movie_inds
                 ) / (n_users_sampled * n_movies_sampled))
 
-        users, movies = self.user_data[user_inds], self.movie_data[movie_inds]
+        users, movies = user_data[user_inds], movie_data[movie_inds]
         ratings = self._slice_edges(edges, user_inds, movie_inds).unsqueeze(dim=0)  # shape = (1, n, m)
 
         mask = (ratings != 0).float()
