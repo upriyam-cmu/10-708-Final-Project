@@ -348,7 +348,7 @@ class CoreMovieLensDataset:
 
     def get_subgraph(self, subgraph_size, target_density,
                      include_train_edges=True, include_test_edges=True,
-                     *, include_separate_train_test_ratings=False, include_review_count_feats=False, debug=False):
+                     *, include_separate_train_test_ratings=False, include_review_count_feats=True, debug=False):
         if subgraph_size is None:
             subgraph_size = (self.n_users, self.n_movies)
         else:
