@@ -71,13 +71,13 @@ class MovieLensFeatureEmb(nn.Module):
 
     @property
     def embed_dim(self):
-        return self.age_dim + self.gender_dim + self.occupation_dim + self.combined_genre_dim + 1
+        return self.age_dim + self.gender_dim + self.occupation_dim + self.combined_genre_dim + 3
 
     def forward(self, x):
         # dims = [ft, user, movie]
-        # ft = [1 rating, 6 genres, --> these are all bogus rn --> 1 age, 1 gender, 1 occupation]
+        # ft = [1 rating, 6 genres, --> these are all bogus rn --> 1 age, 1 gender, 1 occupation, 1 movie_review_counts, 1 user_review_counts]
         # x.shape = (b, f, n, m)
-        assert x.shape[1] == 4 + self.MAX_N_GENRES
+        assert x.shape[1] == 6 + self.MAX_N_GENRES
 
         if self.add_genres:
             collapse_genres = lambda z: z.swapdims(1, -1).sum(dim=-1)
@@ -85,16 +85,18 @@ class MovieLensFeatureEmb(nn.Module):
             collapse_genres = idx('b f n m e -> b (f e) n m')
 
         rating_embeds = x[:, 0:1]
+        movie_review_embeds = x[:,7:8]
+        user_review_embeds = x[:,11:12]
         genre_embeds = pipe(x[:, 1:7]) | toi | assert_in(0, self.N_GENRE_VALUES) \
                        | self.genre_embedding | collapse_genres | pipe.extract
-        age_embeds = pipe(x[:, 7]) | toi | assert_in(0, self.N_AGE_VALUES) \
+        age_embeds = pipe(x[:, 8]) | toi | assert_in(0, self.N_AGE_VALUES) \
                      | self.age_embedding | idx('b n m e -> b e n m') | pipe.extract
-        gender_embeds = pipe(x[:, 8]) | toi | assert_in(0, self.N_GENDER_VALUES) \
+        gender_embeds = pipe(x[:, 9]) | toi | assert_in(0, self.N_GENDER_VALUES) \
                         | self.gender_embedding | idx('b n m e -> b e n m') | pipe.extract
-        occupation_embeds = pipe(x[:, 9]) | toi | assert_in(0, self.N_OCCUPATION_VALUES) \
+        occupation_embeds = pipe(x[:, 10]) | toi | assert_in(0, self.N_OCCUPATION_VALUES) \
                             | self.occupation_embedding | idx('b n m e -> b e n m') | pipe.extract
-
-        full_embeds = torch.cat([rating_embeds, genre_embeds, age_embeds, gender_embeds, occupation_embeds], dim=1)
+        
+        full_embeds = torch.cat([rating_embeds, genre_embeds, movie_review_embeds, age_embeds, gender_embeds, occupation_embeds, user_review_embeds], dim=1)
         assert full_embeds.shape[1] == self.embed_dim
 
         return full_embeds
@@ -364,4 +366,4 @@ class GraphReconstructionModel(nn.Module):
 if __name__ == '__main__':
     model = GraphReconstructionModel.default(transformer=True)
     print("num params:", sum(param.numel() for param in model.parameters()))
-    model(torch.rand(1, 10, 8, 9), torch.tensor([1]), None)
+    model(torch.rand(1, 12, 8, 9), torch.tensor([1]), None)
