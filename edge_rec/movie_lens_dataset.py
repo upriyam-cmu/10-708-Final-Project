@@ -24,9 +24,6 @@ class RawMovieLens100K(MovieLens100K):
     def __init__(self, root, transform=None, pre_transform=None, force_reload=False):
         super(RawMovieLens100K, self).__init__(root, transform, pre_transform, force_reload)
 
-    def __init__(self, root, transform=None, pre_transform=None, force_reload=False):
-        super(RawMovieLens100K, self).__init__(root, transform, pre_transform, force_reload)
-
     def _bucket_ages(self, df):
         bins = [0, 18, 25, 35, 45, 50, 56, 200]
         labels = [0, 1, 2, 3, 4, 5, 6]
