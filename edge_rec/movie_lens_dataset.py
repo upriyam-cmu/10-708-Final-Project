@@ -328,6 +328,13 @@ class CoreMovieLensDataset:
         user_edge_count = [self._count_unique(edges, 0, self.n_users) for edges in edge_sets]
         movie_edge_count = [self._count_unique(edges, 1, self.n_movies) for edges in edge_sets]
         return user_edge_count, movie_edge_count
+    
+    def _construct_review_features(self, review_count):
+        x = review_count.reshape((-1,1))
+        log_x = torch.log(x)
+        log_x_squared = log_x**2
+        out = torch.cat([log_x, log_x_squared], axis=1)
+        return out
 
     @staticmethod
     def _slice_edges(edges, user_inds, movie_inds) -> torch.Tensor:
@@ -368,8 +375,8 @@ class CoreMovieLensDataset:
 
         user_data, movie_data = self.user_data, self.movie_data
         if include_review_count_feats:
-            user_data = torch.cat([user_data, user_review_counts.reshape(-1,1)], axis=1)
-            movie_data = torch.cat([movie_data, movie_review_counts.reshape(-1,1)], axis=1)
+            user_data = torch.cat([user_data, self._construct_review_features(user_review_counts)], axis=1)
+            movie_data = torch.cat([movie_data, self._construct_review_features(movie_review_counts)], axis=1)
 
         if target_density is None:
             user_inds = np.random.choice(self.n_users, n_users_sampled, replace=False)
