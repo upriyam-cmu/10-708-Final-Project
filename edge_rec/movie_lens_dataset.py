@@ -30,22 +30,17 @@ class RawMovieLens100K(MovieLens100K):
         df["age"] = pd.cut(df["age"], bins=bins, labels=labels)
         return df
 
-    def _process_genres(self, df, one_hot=True):
-        l_df = df[self.MOVIE_HEADERS[6:]].values
-        
-        if one_hot:
-            return l_df
-        
-        max_genres = l_df.sum(axis=1).max()
+    def _process_genres(self, df):
+        l = df[self.MOVIE_HEADERS[6:]].values
+        max_genres = l.sum(axis=1).max()
         idx_list = []
-        for i in range(l_df.shape[0]):
-            idxs = np.where(l_df[i, :] == 1)[0] + 1
+        for i in range(l.shape[0]):
+            idxs = np.where(l[i, :] == 1)[0] + 1
             missing = max_genres - len(idxs)
             if missing > 0:
                 idxs = np.array(list(idxs) + missing * [0])
             idx_list.append(idxs)
-        out = np.stack(idx_list)
-        return out
+        return np.stack(idx_list)
 
     def process(self) -> None:
         import pandas as pd
@@ -143,12 +138,8 @@ class RawMovieLens1M(MovieLens1M):
     def __init__(self, root, transform=None, pre_transform=None, force_reload=False):
         super(RawMovieLens1M, self).__init__(root, transform, pre_transform, force_reload)
 
-    def _process_genres(self, df, one_hot=True):
+    def _process_genres(self, df):
         l = df["genres"].str.get_dummies('|').values
-
-        if one_hot:
-            return l
-
         max_genres = l.sum(axis=1).max()
         idx_list = []
         for i in range(l.shape[0]):
@@ -157,8 +148,7 @@ class RawMovieLens1M(MovieLens1M):
             if missing > 0:
                 idxs = np.array(list(idxs) + missing * [0])
             idx_list.append(idxs)
-        out = np.stack(idx_list)
-        return out
+        return np.stack(idx_list)
 
     def process(self) -> None:
         import pandas as pd
@@ -252,7 +242,7 @@ class CoreMovieLensDataset:
 
         data = torch.load(processed_data_path)[0]
         self.user_data = data['user']['x'].int()
-        self.movie_data = data['movie']['x'].int()
+        self.movie_data = self._preprocess_movie_genres(data['movie']['x'].int())
         self.n_users = len(self.user_data)
         self.n_movies = len(self.movie_data)
 
@@ -678,7 +668,3 @@ class FullGraphSampler(IterableDataset):
 
     def __iter__(self):
         return self
-
-if __name__ == "__main__":
-    dataset = CoreMovieLensDataset("ml/data/")
-    import pdb; pdb.set_trace()
