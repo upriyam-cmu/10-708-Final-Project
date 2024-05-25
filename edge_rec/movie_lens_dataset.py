@@ -232,7 +232,7 @@ class RawMovieLens1M(MovieLens1M):
 class CoreMovieLensDataset:
     PROCESSED_DSET_PATH = "processed/data.pt"
 
-    def __init__(self, root, ml_100k=True, test_split=0.1, force_download=False):
+    def __init__(self, root, ml_100k=True, test_split=0.1, return_binary_targets=False, force_download=False):
         root = Path(root) / ("ml100k" if ml_100k else "ml1m")
         processed_data_path = root / self.PROCESSED_DSET_PATH
 
@@ -241,6 +241,7 @@ class CoreMovieLensDataset:
             dataset_class(str(root), force_reload=True).process()
 
         data = torch.load(processed_data_path)[0]
+        self.return_binary_targets = return_binary_targets
         self.user_data = data['user']['x'].int()
         self.movie_data = self._preprocess_movie_genres(data['movie']['x'].int())
         self.n_users = len(self.user_data)
@@ -417,7 +418,9 @@ class CoreMovieLensDataset:
         users = repeat(users, 'n f -> f n m', m=n_movies_sampled).float()
         movies = repeat(movies, 'm f -> f n m', n=n_users_sampled).float()
 
-        ret = torch.cat([ratings, movies, users, mask], dim=0)
+        targets = mask if self.return_binary_targets else ratings
+
+        ret = torch.cat([targets, movies, users, mask], dim=0)
         if include_separate_train_test_ratings:
             train_ratings = self._slice_edges(self.train_edges, user_inds, movie_inds)
             test_ratings = self._slice_edges(self.test_edges, user_inds, movie_inds)
