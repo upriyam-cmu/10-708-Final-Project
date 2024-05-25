@@ -274,7 +274,7 @@ class GaussianDiffusion(nn.Module):
         zeros = torch.zeros_like(x, device=model_output.device)
         zeros[:, 0, :, :] = model_output
         model_output = zeros
-        maybe_clip = partial(torch.clamp, min=-1., max=1.) if clip_x_start else identity
+        maybe_clip = partial(torch.clamp, min=0, max=1.) if clip_x_start else identity
 
         if self.objective == 'pred_noise':
             pred_noise = model_output
@@ -302,7 +302,7 @@ class GaussianDiffusion(nn.Module):
         x_start = preds.pred_x_start
 
         if clip_denoised:
-            x_start.clamp_(-1., 1.)
+            x_start.clamp_(0, 1.)
 
         model_mean, posterior_variance, posterior_log_variance = self.q_posterior(x_start=x_start, x_t=x, t=t)
         return model_mean, posterior_variance, posterior_log_variance, x_start
