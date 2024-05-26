@@ -419,7 +419,7 @@ class CoreMovieLensDataset:
         movies = repeat(movies, 'm f -> f n m', n=n_users_sampled).float()
 
         targets = mask if self.return_binary_targets else ratings
-        mask = ratings >= 0 if self.return_binary_targets else mask
+        mask = ratings >= 0 if self.return_binary_targets else mask #do not mask if predicting binary interactions
 
         ret = torch.cat([targets, movies, users, mask], dim=0)
         if include_separate_train_test_ratings:

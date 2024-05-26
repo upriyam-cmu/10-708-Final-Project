@@ -597,7 +597,7 @@ class Trainer(object):
         self.max_grad_norm = max_grad_norm
 
         if use_alternate_dense_dataset:
-            core_dataset = CoreMovieLensDataset(folder)
+            core_dataset = CoreMovieLensDataset(folder, return_binary_targets=True)
             subgraph_size, target_density = diffusion_model.image_size, 0.7
             self.ds = MovieLensDatasetWrapper(
                 core_dataset,
