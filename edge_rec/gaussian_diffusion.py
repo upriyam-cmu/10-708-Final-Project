@@ -562,7 +562,8 @@ class Trainer(object):
             use_alternate_dense_dataset=False,
             alternate_dense_dataset_density=0.7,
             train_on_binary_targets=False,
-            train_mask_unknown_ratings=True
+            train_mask_unknown_ratings=True,
+            ml_100k=True,
     ):
         super().__init__()
 
@@ -601,7 +602,7 @@ class Trainer(object):
         self.train_mask_unknown_ratings = train_mask_unknown_ratings
 
         if use_alternate_dense_dataset:
-            core_dataset = CoreMovieLensDataset(folder, return_binary_targets=train_on_binary_targets)
+            core_dataset = CoreMovieLensDataset(folder, ml_100k=ml_100k, return_binary_targets=train_on_binary_targets)
             subgraph_size, target_density = diffusion_model.image_size, alternate_dense_dataset_density
             self.ds = MovieLensDatasetWrapper(
                 core_dataset,
