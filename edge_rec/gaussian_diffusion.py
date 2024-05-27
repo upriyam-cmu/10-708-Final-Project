@@ -560,7 +560,8 @@ class Trainer(object):
             save_best_and_latest_only=False,
             train_on_full_graph=False,
             use_alternate_dense_dataset=False,
-            train_on_binary_targets=False
+            train_on_binary_targets=False,
+            ml_100k=True
     ):
         super().__init__()
 
@@ -598,7 +599,7 @@ class Trainer(object):
         self.max_grad_norm = max_grad_norm
 
         if use_alternate_dense_dataset:
-            core_dataset = CoreMovieLensDataset(folder, return_binary_targets=train_on_binary_targets)
+            core_dataset = CoreMovieLensDataset(folder, return_binary_targets=train_on_binary_targets, ml_100k=ml_100k)
             subgraph_size, target_density = diffusion_model.image_size, 0.7
             self.ds = MovieLensDatasetWrapper(
                 core_dataset,

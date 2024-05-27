@@ -456,12 +456,21 @@ class MovieLensDatasetWrapper(IterableDataset):
     def __next__(self):
         return self.__getitem__()
 
-    def build_feat_graph(self):
+    def build_feat_graph(self, include_separate_train_test_ratings=False):
+        if include_separate_train_test_ratings:
+            return self.dataset.get_subgraph(
+                subgraph_size=None,
+                target_density=None,
+                include_train_edges=True,
+                include_test_edges=True,
+                include_separate_train_test_ratings=True
+            )
+            
         return self.dataset.get_subgraph(
             subgraph_size=None,
             target_density=None,
             include_train_edges=True,
-            include_test_edges=True
+            include_test_edges=True,
         )[:-1]  # drop mask
 
 
