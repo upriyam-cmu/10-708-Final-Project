@@ -363,7 +363,9 @@ class CoreMovieLensDataset:
 
     def get_subgraph(self, subgraph_size, target_density,
                      include_train_edges=True, include_test_edges=True,
-                     *, include_separate_train_test_ratings=False, include_review_count_feats=True, debug=False):
+                     *, include_separate_train_test_ratings=False,
+                     mask_unknown_ratings=True, 
+                     include_review_count_feats=True, debug=False):
         if subgraph_size is None:
             subgraph_size = (self.n_users, self.n_movies)
         else:
@@ -424,12 +426,12 @@ class CoreMovieLensDataset:
         ratings = self._slice_edges(edges, user_inds, movie_inds).unsqueeze(dim=0)  # shape = (1, n, m)
 
         mask = (ratings != 0).float()
-        ratings = (2 * (ratings.float() - 3) / 5) * mask  # re-mask missing entries to 0 post-transformation
+        ratings = (2 * (ratings.float() - 3) / 5 + 0.2) * mask  # re-mask missing entries to 0 post-transformation
         users = repeat(users, 'n f -> f n m', m=n_movies_sampled).float()
         movies = repeat(movies, 'm f -> f n m', n=n_users_sampled).float()
 
         targets = mask if self.return_binary_targets else ratings
-        mask = (ratings >= 0).float() if self.return_binary_targets else mask #do not mask if predicting binary interactions
+        mask = torch.ones_like(mask).to(mask.device) if self.return_binary_targets or not mask_unknown_ratings else mask #do not mask if predicting binary interactions
 
         ret = torch.cat([targets, movies, users, mask], dim=0)
         if include_separate_train_test_ratings:
@@ -444,20 +446,22 @@ class CoreMovieLensDataset:
 
 class MovieLensDatasetWrapper(IterableDataset):
     def __init__(self, dataset: CoreMovieLensDataset, subgraph_size, target_density: float,
-                 train: bool, n_subsamples: int, batch_size: int):
+                 train: bool, n_subsamples: int, batch_size: int, mask_unknown_ratings=True):
         self.dataset = dataset
         self.subgraph_size = subgraph_size
         self.target_density = target_density
         self.train = train
         self.n_subsamples = n_subsamples
         self.batch_size = batch_size
+        self.mask_unknown_ratings = mask_unknown_ratings
 
     def __getitem__(self, idx=None):
         return self.dataset.get_subgraph(
             subgraph_size=self.subgraph_size,
             target_density=self.target_density,
             include_train_edges=self.train,
-            include_test_edges=not self.train
+            include_test_edges=not self.train,
+            mask_unknown_ratings=self.mask_unknown_ratings
         )
 
     def __iter__(self):

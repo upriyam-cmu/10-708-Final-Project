@@ -560,7 +560,9 @@ class Trainer(object):
             save_best_and_latest_only=False,
             train_on_full_graph=False,
             use_alternate_dense_dataset=False,
-            train_on_binary_targets=False
+            alternate_dense_dataset_density=0.7,
+            train_on_binary_targets=False,
+            train_mask_unknown_ratings=True
     ):
         super().__init__()
 
@@ -596,10 +598,11 @@ class Trainer(object):
         self.image_size = diffusion_model.image_size
 
         self.max_grad_norm = max_grad_norm
+        self.train_mask_unknown_ratings = train_mask_unknown_ratings
 
         if use_alternate_dense_dataset:
             core_dataset = CoreMovieLensDataset(folder, return_binary_targets=train_on_binary_targets)
-            subgraph_size, target_density = diffusion_model.image_size, 0.7
+            subgraph_size, target_density = diffusion_model.image_size, alternate_dense_dataset_density
             self.ds = MovieLensDatasetWrapper(
                 core_dataset,
                 subgraph_size,
@@ -607,6 +610,7 @@ class Trainer(object):
                 train=True,
                 n_subsamples=n_subsamples,
                 batch_size=train_batch_size,
+                mask_unknown_ratings=self.train_mask_unknown_ratings
             )
             self.test_ds = MovieLensDatasetWrapper(
                 core_dataset,
@@ -615,6 +619,7 @@ class Trainer(object):
                 train=False,
                 n_subsamples=n_subsamples,
                 batch_size=train_batch_size,
+                mask_unknown_ratings=True
             )
         else:
             download = not Path(folder + "/processed/data.pt").exists()
