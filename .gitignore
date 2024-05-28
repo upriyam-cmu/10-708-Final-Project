@@ -162,5 +162,5 @@ cython_debug/
 .DS_Store
 
 movie_lens/
-results*/
+results/
 data/
