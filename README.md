@@ -10,3 +10,6 @@ We train on 1000 diffusion steps for 10000 iterations on a single A100 GPU in th
 
 ### Replicability
 Results can be replicated in a step-by-step fashion by running the [execute.ipynb](./execute.ipynb) notebook.
+
+### Acknowledgments
+The denoising diffusion model borrows from [denoising-diffusion-pytorch](https://github.com/lucidrains/denoising-diffusion-pytorch). 
