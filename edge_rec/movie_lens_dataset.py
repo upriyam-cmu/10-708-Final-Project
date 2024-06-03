@@ -700,5 +700,5 @@ class FullGraphSampler(IterableDataset):
         return self
 
 if __name__ == "__main__":
-    dataset = CoreMovieLensDataset("ml/data/")
+    dataset = CoreMovieLensDataset("movie_lens/data/", ml_100k=False)
     import pdb; pdb.set_trace()

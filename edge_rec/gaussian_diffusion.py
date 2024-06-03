@@ -308,7 +308,7 @@ class GaussianDiffusion(nn.Module):
         return model_mean, posterior_variance, posterior_log_variance, x_start
 
     @torch.inference_mode()
-    def p_sample(self, x, t: int, self_cond=None):
+    def p_sample(self, x, x_0, t: int, self_cond=None, inpaint_mask=None):
         b, *_, device = *x.shape, self.device
         batched_times = torch.full((b,), t, device=device, dtype=torch.long)
         model_mean, _, model_log_variance, x_start = self.p_mean_variance(x=x, t=batched_times, x_self_cond=self_cond,
@@ -317,6 +317,9 @@ class GaussianDiffusion(nn.Module):
         if isinstance(noise, torch.Tensor):
             noise[:, 1:, :, :] = 0
         pred_img = model_mean + (0.5 * model_log_variance).exp() * noise
+        if inpaint_mask is not None:
+            x_t = self.q_sample(x_0, t)
+            pred_img[inpaint_mask] = x_t[inpaint_mask]
         return pred_img, x_start
 
     def _subsample_img(self, img, sample_full_params):
@@ -368,7 +371,8 @@ class GaussianDiffusion(nn.Module):
         return _subsample, n_groups
 
     @torch.inference_mode()
-    def p_sample_loop(self, x_start, return_all_timesteps=False, sample_full_params=None):
+    def p_sample_loop(self, x_start, return_all_timesteps=False, sample_full_params=None, inpaint_mask=None):
+        x_0 = x_start.clone()
         img = x_start
         imgs = [img]
 
@@ -376,7 +380,7 @@ class GaussianDiffusion(nn.Module):
         for t in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step', total=self.num_timesteps):
             subsampler, n_subsamples = self._subsample_img(img, sample_full_params)
             for sub_img, ind_map in tqdm2(subsampler(), desc='subsampling loop', total=n_subsamples):
-                new_img, _ = self.p_sample(sub_img, t, self_cond=None)
+                new_img, _ = self.p_sample(sub_img, x_0, t, self_cond=None, inpaint_mask=inpaint_mask)
                 if ind_map is None:
                     new_img[:, 1:, :, :] = sub_img[:, 1:, :, :]
                     img = new_img
@@ -390,7 +394,7 @@ class GaussianDiffusion(nn.Module):
         return img if not return_all_timesteps else torch.stack(imgs, dim=1)
 
     @torch.inference_mode()
-    def ddim_sample(self, x_start, return_all_timesteps=False, sample_full_params=None):
+    def ddim_sample(self, x_start, return_all_timesteps=False, sample_full_params=None, inpaint_mask=None):
         batch, device, total_timesteps, sampling_timesteps, eta, objective = x_start.shape[
             0], self.device, self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective
 
@@ -438,16 +442,16 @@ class GaussianDiffusion(nn.Module):
         return img if not return_all_timesteps else torch.stack(imgs, dim=1)
 
     @torch.inference_mode()
-    def sample(self, x_start, return_all_timesteps=False, sample_full_params=None):
+    def sample(self, x_start, return_all_timesteps=False, sample_full_params=None, inpaint_mask=None):
         sample_fn = self.p_sample_loop if not self.is_ddim_sampling else self.ddim_sample
         assert not return_all_timesteps or sample_full_params is None
-        return sample_fn(x_start, return_all_timesteps=return_all_timesteps, sample_full_params=sample_full_params)
+        return sample_fn(x_start, return_all_timesteps=return_all_timesteps, sample_full_params=sample_full_params, inpaint_mask=inpaint_mask)
 
     @torch.inference_mode()
-    def sample_full(self, x_start, max_batch_size, *subgraph_sizes):
+    def sample_full(self, x_start, max_batch_size, inpaint_mask, *subgraph_sizes):
         if len(x_start.shape) == 3:
             x_start = x_start.unsqueeze(dim=0)
-        return self.sample(x_start, return_all_timesteps=False, sample_full_params=(max_batch_size, *subgraph_sizes))
+        return self.sample(x_start, return_all_timesteps=False, sample_full_params=(max_batch_size, *subgraph_sizes), inpaint_mask)
 
     @torch.inference_mode()
     def interpolate(self, x1, x2, t=None, lam=0.5):
@@ -775,14 +779,14 @@ class Trainer(object):
 
         accelerator.print('training complete')
 
-    def eval(self, milestone=None, full_graph=None, batch_size=16, subgraph_size=(128, 128)):
+    def eval(self, milestone=None, full_graph=None, batch_size=16, subgraph_size=(128, 128), do_inpaint_sampling=False):
         if milestone is not None:
             self.load(milestone)
         if full_graph is None:
-            full_graph = self.ds.build_feat_graph()
-        full_graph[0, :] = torch.randn_like(full_graph[0])
-        full_graph = full_graph.unsqueeze(dim=0).to(self.device)
-        sampled_graph = self.ema.ema_model.sample_full(full_graph, batch_size, subgraph_size)
+            full_graph = self.ds.build_feat_graph(include_mask=True)
+        edge_mask = full_graph[-1, :, :] if do_inpaint_sampling else None
+        full_graph = full_graph[:-1,:,:].unsqueeze(dim=0).to(self.device)
+        sampled_graph = self.ema.ema_model.sample_full(full_graph, batch_size, edge_mask, subgraph_size)
         np.save(
             str(self.results_folder / f"full-graph-sample-{milestone}.npy"),
             sampled_graph[0, 0, :, :].cpu().detach().numpy()
