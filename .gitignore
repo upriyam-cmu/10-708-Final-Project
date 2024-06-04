@@ -161,5 +161,7 @@ cython_debug/
 .vscode/
 .DS_Store
 
-#results/
+results/
 data/
+models/
+metrics/

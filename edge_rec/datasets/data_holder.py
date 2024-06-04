@@ -6,7 +6,7 @@ from torch.utils.data import IterableDataset
 
 RatingSubGraphData = namedtuple(
     'RatingSubGraphData',
-    ['train_edges', 'test_edges', 'train_mask', 'test_mask', 'user_features', 'product_features']
+    ['train_ratings', 'test_ratings', 'train_mask', 'test_mask', 'user_features', 'product_features']
 )
 
 
@@ -36,8 +36,13 @@ class DataHolder(ABC):
 
     @abstractmethod
     def get_subgraph(
-            self, subgraph_size, target_density: float, *,
-            return_train_edges: bool = True, return_test_edges: bool = True) -> RatingSubGraphData:
+            self,
+            subgraph_size,
+            target_density,
+            *,
+            return_train_edges: bool = True,
+            return_test_edges: bool = True,
+    ) -> RatingSubGraphData:
         pass
 
     def get_dataset(self, subgraph_size, target_density: float, train: bool):
