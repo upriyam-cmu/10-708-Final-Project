@@ -451,7 +451,7 @@ class GaussianDiffusion(nn.Module):
     def sample_full(self, x_start, max_batch_size, inpaint_mask, *subgraph_sizes):
         if len(x_start.shape) == 3:
             x_start = x_start.unsqueeze(dim=0)
-        return self.sample(x_start, return_all_timesteps=False, sample_full_params=(max_batch_size, *subgraph_sizes), inpaint_mask)
+        return self.sample(x_start, return_all_timesteps=False, sample_full_params=(max_batch_size, *subgraph_sizes), inpaint_mask=inpaint_mask)
 
     @torch.inference_mode()
     def interpolate(self, x1, x2, t=None, lam=0.5):

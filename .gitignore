@@ -161,6 +161,5 @@ cython_debug/
 .vscode/
 .DS_Store
 
-movie_lens/
-results/
+#results/
 data/

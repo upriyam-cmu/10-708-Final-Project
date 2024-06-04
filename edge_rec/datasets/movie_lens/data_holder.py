@@ -1,0 +1,215 @@
+from .ml1m import RawMovieLens1M
+from .ml100k import RawMovieLens100K
+
+from ..data_holder import DataHolder
+from ..transforms import *
+
+from einops import repeat
+import numpy as np
+from pathlib import Path
+import torch
+
+
+class MovieLensDataHolder(DataHolder):
+    def __init__(self, root, ml_100k=True, test_split=0.1, return_binary_targets=False, force_download=False):
+        super().__init__(
+            data_root=(Path(root) / ("ml100k" if ml_100k else "ml1m")),
+            dataset_class=(RawMovieLens100K if ml_100k else RawMovieLens1M),
+            test_split_ratio=test_split,
+            force_download=force_download,
+        )
+
+        data = torch.load(self.processed_data_path)[0]
+        self.return_binary_targets = return_binary_targets
+        self.user_data = data['user']['x'].int()
+        self.movie_data = data['movie']['x'].int()
+        self.n_users = len(self.user_data)
+        self.n_movies = len(self.movie_data)
+
+        self.train_edges, self.test_edges, self.all_edges = self._split_edges(
+            data[('user', 'rates', 'movie')]['edge_index'],
+            data[('user', 'rates', 'movie')]['rating'],
+            test_split=test_split
+        )
+
+        (self.user_train_review_count, self.user_all_review_count), (
+            self.movie_train_review_count, self.movie_all_review_count) = self._build_review_count()
+
+        self.top_users, self.top_movies = self._build_density_scores(self.all_edges, self.n_users, self.n_movies)
+
+    @staticmethod
+    def _build_density_scores(all_edges, n_users, n_movies):
+        movie_stats = [set() for _ in range(n_movies)]
+        user_stats = [set() for _ in range(n_users)]
+        for user, movie in all_edges[0]:
+            movie_stats[movie].add(user)
+            user_stats[user].add(movie)
+        assert len(user_stats) == n_users and len(movie_stats) == n_movies
+
+        user_scores = np.array([
+            sum(len(movie_stats[movie]) for movie in movies)
+            for user, movies in enumerate(user_stats)
+        ])
+        movie_scores = np.array([
+            sum(len(user_stats[user]) for user in users)
+            for movie, users in enumerate(movie_stats)
+        ])
+
+        top_users = np.argsort(user_scores)[::-1]
+        top_movies = np.argsort(movie_scores)[::-1]
+
+        return top_users, top_movies
+
+    @staticmethod
+    def _split_edges(edge_inds: torch.Tensor, edge_ratings: torch.Tensor, test_split: float):
+        n_edges = len(edge_ratings)
+
+        edge_inds, edge_ratings = edge_inds.numpy(), edge_ratings.numpy()
+        sort_inds = np.argsort(edge_inds[0])
+        edge_inds, edge_ratings = edge_inds[:, sort_inds], edge_ratings[sort_inds]
+
+        train_group, test_group = [], []
+        _, split_inds = np.unique(edge_inds[0], return_index=True)
+        for edge_group in np.split(np.arange(n_edges), split_inds[1:]):
+            np.random.shuffle(edge_group)
+            n_test = int(test_split * len(edge_group))
+            train_group.append(edge_group[:-n_test])
+            test_group.append(edge_group[-n_test:])
+
+        train_group = np.concatenate(train_group)
+        test_group = np.concatenate(test_group)
+
+        train_edges = edge_inds.T[train_group], edge_ratings[train_group]
+        test_edges = edge_inds.T[test_group], edge_ratings[test_group]
+        all_edges = edge_inds.T, edge_ratings
+
+        return train_edges, test_edges, all_edges
+
+    @staticmethod
+    def _preprocess_movie_genres(movie_data, pad_len=6):
+        movie_genres = []
+        for one_hot in movie_data:
+            nonzeros = torch.nonzero(one_hot, as_tuple=True)
+            assert len(nonzeros) == 1
+            nonzeros = nonzeros[0] + 1
+            genre_list = torch.zeros(pad_len)
+            genre_list[:len(nonzeros)] = nonzeros
+            movie_genres.append(genre_list)
+        return torch.stack(movie_genres)
+
+    @staticmethod
+    def _count_unique(edges, col, n_unique):
+        count = torch.tensor(np.column_stack(np.unique(edges[0][:, col], axis=0, return_counts=True)))
+        out = torch.zeros(n_unique)
+        out[count[:, 0]] = count[:, 1].float()
+        return out
+
+    def _build_review_count(self):
+        edge_sets = [self.train_edges, self.all_edges]
+        user_edge_count = [self._count_unique(edges, 0, self.n_users) for edges in edge_sets]
+        movie_edge_count = [self._count_unique(edges, 1, self.n_movies) for edges in edge_sets]
+        return user_edge_count, movie_edge_count
+
+    def _construct_review_features(self, review_count):
+        x = review_count.reshape((-1, 1))
+        log_x = torch.log(x)
+        log_x_squared = log_x ** 2
+        out = torch.cat([log_x, log_x_squared], axis=1)
+        return out
+
+    @staticmethod
+    def _slice_edges(edges, user_inds, movie_inds) -> torch.Tensor:
+        n_users_sampled, n_movies_sampled = len(user_inds), len(movie_inds)
+        user_id_to_ind = {user_id: idx for idx, user_id in enumerate(user_inds)}
+        assert len(user_id_to_ind) == n_users_sampled
+        movie_id_to_ind = {movie_id: idx for idx, movie_id in enumerate(movie_inds)}
+        assert len(movie_id_to_ind) == n_movies_sampled
+
+        sliced = torch.zeros(n_users_sampled, n_movies_sampled)
+        for (user_id, movie_id), rating in zip(*edges):
+            if user_id in user_id_to_ind and movie_id in movie_id_to_ind:
+                sliced[user_id_to_ind[user_id], movie_id_to_ind[movie_id]] = rating
+        return sliced
+
+    def get_subgraph(self, subgraph_size, target_density,
+                     include_train_edges=True, include_test_edges=True,
+                     *, include_separate_train_test_ratings=False,
+                     mask_unknown_ratings=True,
+                     include_review_count_feats=True, debug=False):
+        if subgraph_size is None:
+            subgraph_size = (self.n_users, self.n_movies)
+        else:
+            sz1, sz2 = (subgraph_size, subgraph_size) if isinstance(subgraph_size, int) else subgraph_size
+            if sz1 is None:
+                sz1 = self.n_users
+            if sz2 is None:
+                sz2 = self.n_movies
+            subgraph_size = (sz1, sz2)
+        assert len(subgraph_size) == 2 and all(type(sz) == int for sz in subgraph_size), f"size={subgraph_size}"
+        n_users_sampled, n_movies_sampled = subgraph_size
+
+        assert include_train_edges or include_test_edges, "Must include at least one of train/test edges"
+        if include_train_edges and include_test_edges:
+            edges = self.all_edges
+            user_review_counts, movie_review_counts = self.user_all_review_count, self.movie_all_review_count
+        else:
+            edges = self.train_edges if include_train_edges else self.test_edges
+            user_review_counts, movie_review_counts = self.user_train_review_count, self.movie_train_review_count
+
+        user_data, movie_data = self.user_data, self.movie_data
+        if include_review_count_feats:
+            user_data = torch.cat([user_data, self._construct_review_features(user_review_counts)], axis=1)
+            movie_data = torch.cat([movie_data, self._construct_review_features(movie_review_counts)], axis=1)
+
+        if target_density is None:
+            user_inds = np.random.choice(self.n_users, n_users_sampled, replace=False)
+            movie_inds = np.random.choice(self.n_movies, n_movies_sampled, replace=False)
+        else:
+            slice_point = round((target_density ** (-1 / 2.25) - 1) * 500)
+            assert slice_point >= n_users_sampled and slice_point >= n_movies_sampled, \
+                "Desired density too high for desired subgraph size"
+
+            random_weights = ((np.arange(slice_point)[::-1] + 1) / 500 + 1) ** -2.25
+            random_weights = random_weights / random_weights.sum()
+
+            user_inds = np.random.choice(
+                self.top_users[:slice_point],
+                size=n_users_sampled,
+                replace=False,
+                p=random_weights
+            )
+            movie_inds = np.random.choice(
+                self.top_movies[:slice_point],
+                size=n_movies_sampled,
+                replace=False,
+                p=random_weights
+            )
+
+            if debug:
+                print("Density:", sum(
+                    1
+                    for user, movie in edges[0]
+                    if user in user_inds and movie in movie_inds
+                ) / (n_users_sampled * n_movies_sampled))
+
+        users, movies = user_data[user_inds], movie_data[movie_inds]
+        ratings = self._slice_edges(edges, user_inds, movie_inds).unsqueeze(dim=0)  # shape = (1, n, m)
+
+        mask = (ratings != 0).float()
+        ratings = (2 * (ratings.float() - 3) / 5 + 0.2) * mask  # re-mask missing entries to 0 post-transformation
+        users = repeat(users, 'n f -> f n m', m=n_movies_sampled).float()
+        movies = repeat(movies, 'm f -> f n m', n=n_users_sampled).float()
+
+        targets = mask if self.return_binary_targets else ratings
+        mask = torch.ones_like(mask).to(
+            mask.device) if self.return_binary_targets or not mask_unknown_ratings else mask  # do not mask if predicting binary interactions
+
+        ret = torch.cat([targets, movies, users, mask], dim=0)
+        if include_separate_train_test_ratings:
+            train_ratings = self._slice_edges(self.train_edges, user_inds, movie_inds)
+            test_ratings = self._slice_edges(self.test_edges, user_inds, movie_inds)
+
+            train_ratings = (train_ratings != 0).float() if self.return_binary_targets else train_ratings
+            test_ratings = (test_ratings != 0).float() if self.return_binary_targets else test_ratings
+            ret = ret, train_ratings, test_ratings
+        return ret

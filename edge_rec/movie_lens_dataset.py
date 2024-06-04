@@ -4,239 +4,10 @@ from pathlib import Path
 
 import torch
 from torch.utils.data import IterableDataset
-from torch_geometric.datasets import MovieLens1M, MovieLens100K
-
-from torch_geometric.data import HeteroData
 
 from einops import repeat
 
-
-class RawMovieLens100K(MovieLens100K):
-    MOVIE_HEADERS = [
-        "movieId", "title", "releaseDate", "videoReleaseDate", "IMDb URL",
-        "unknown", "Action", "Adventure", "Animation", "Children's", "Comedy",
-        "Crime", "Documentary", "Drama", "Fantasy", "Film-Noir", "Horror",
-        "Musical", "Mystery", "Romance", "Sci-Fi", "Thriller", "War", "Western"
-    ]
-    USER_HEADERS = ["userId", "age", "gender", "occupation", "zipCode"]
-    RATING_HEADERS = ["userId", "movieId", "rating", "timestamp"]
-
-    def __init__(self, root, transform=None, pre_transform=None, force_reload=False):
-        super(RawMovieLens100K, self).__init__(root, transform, pre_transform, force_reload)
-
-    def _bucket_ages(self, df):
-        bins = [0, 18, 25, 35, 45, 50, 56, 200]
-        labels = [0, 1, 2, 3, 4, 5, 6]
-        df["age"] = pd.cut(df["age"], bins=bins, labels=labels)
-        return df
-
-    def _process_genres(self, df, one_hot=True):
-        l_df = df[self.MOVIE_HEADERS[6:]].values
-        
-        if one_hot:
-            return l_df
-        
-        max_genres = l_df.sum(axis=1).max()
-        idx_list = []
-        for i in range(l_df.shape[0]):
-            idxs = np.where(l_df[i, :] == 1)[0] + 1
-            missing = max_genres - len(idxs)
-            if missing > 0:
-                idxs = np.array(list(idxs) + missing * [0])
-            idx_list.append(idxs)
-        out = np.stack(idx_list)
-        return out
-
-    def process(self) -> None:
-        import pandas as pd
-
-        data = HeteroData()
-
-        # Process movie data:
-        df = pd.read_csv(
-            self.raw_paths[0],
-            sep='|',
-            header=None,
-            names=self.MOVIE_HEADERS,
-            index_col='movieId',
-            encoding='ISO-8859-1',
-        )
-        movie_mapping = {idx: i for i, idx in enumerate(df.index)}
-
-        x = self._process_genres(df)
-        data['movie'].x = torch.from_numpy(x).to(torch.float)
-
-        self.df = x
-
-        # Process user data:
-        df = pd.read_csv(
-            self.raw_paths[1],
-            sep='|',
-            header=None,
-            names=self.USER_HEADERS,
-            index_col='userId',
-            encoding='ISO-8859-1',
-        )
-        user_mapping = {idx: i for i, idx in enumerate(df.index)}
-
-        age = self._bucket_ages(df)["age"].to_numpy()[:, None]
-        age = torch.from_numpy(age).to(torch.float)
-
-        gender = df['gender'].str.get_dummies().values[:, 0][:, None]
-        gender = torch.from_numpy(gender).to(torch.float)
-
-        occupation = df['occupation'].str.get_dummies().values.argmax(axis=1)[:, None]
-        occupation = torch.from_numpy(occupation).to(torch.float)
-
-        data['user'].x = torch.cat([age, gender, occupation], dim=-1)
-
-        # Process rating data for training:
-        df = pd.read_csv(
-            self.raw_paths[2],
-            sep='\t',
-            header=None,
-            names=self.RATING_HEADERS,
-        )
-
-        src = [user_mapping[idx] for idx in df['userId']]
-        dst = [movie_mapping[idx] for idx in df['movieId']]
-        edge_index = torch.tensor([src, dst])
-        data['user', 'rates', 'movie'].edge_index = edge_index
-
-        rating = torch.from_numpy(df['rating'].values).to(torch.long)
-        data['user', 'rates', 'movie'].rating = rating
-
-        time = torch.from_numpy(df['timestamp'].values)
-        data['user', 'rates', 'movie'].time = time
-
-        data['movie', 'rated_by', 'user'].edge_index = edge_index.flip([0])
-        data['movie', 'rated_by', 'user'].rating = rating
-        data['movie', 'rated_by', 'user'].time = time
-
-        # Process rating data for testing:
-        df = pd.read_csv(
-            self.raw_paths[3],
-            sep='\t',
-            header=None,
-            names=self.RATING_HEADERS,
-        )
-
-        src = [user_mapping[idx] for idx in df['userId']]
-        dst = [movie_mapping[idx] for idx in df['movieId']]
-        edge_label_index = torch.tensor([src, dst])
-        data['user', 'rates', 'movie'].edge_label_index = edge_label_index
-
-        edge_label = torch.from_numpy(df['rating'].values).to(torch.float)
-        data['user', 'rates', 'movie'].edge_label = edge_label
-
-        if self.pre_transform is not None:
-            data = self.pre_transform(data)
-
-        self.save([data], self.processed_paths[0])
-
-
-class RawMovieLens1M(MovieLens1M):
-    MOVIE_HEADERS = ["movieId", "title", "genres"]
-    USER_HEADERS = ["userId", "gender", "age", "occupation", "zipCode"]
-    RATING_HEADERS = ['userId', 'movieId', 'rating', 'timestamp']
-
-    def __init__(self, root, transform=None, pre_transform=None, force_reload=False):
-        super(RawMovieLens1M, self).__init__(root, transform, pre_transform, force_reload)
-
-    def _process_genres(self, df, one_hot=True):
-        l = df["genres"].str.get_dummies('|').values
-
-        if one_hot:
-            return l
-
-        max_genres = l.sum(axis=1).max()
-        idx_list = []
-        for i in range(l.shape[0]):
-            idxs = np.where(l[i, :] == 1)[0] + 1
-            missing = max_genres - len(idxs)
-            if missing > 0:
-                idxs = np.array(list(idxs) + missing * [0])
-            idx_list.append(idxs)
-        out = np.stack(idx_list)
-        return out
-
-    def process(self) -> None:
-        import pandas as pd
-
-        data = HeteroData()
-
-        # Process movie data:
-        df = pd.read_csv(
-            self.raw_paths[0],
-            sep='::',
-            header=None,
-            index_col='movieId',
-            names=self.MOVIE_HEADERS,
-            encoding='ISO-8859-1',
-            engine='python',
-        )
-        movie_mapping = {idx: i for i, idx in enumerate(df.index)}
-
-        genres = self._process_genres(df)
-        genres = torch.from_numpy(genres).to(torch.float)
-
-        data['movie'].x = genres
-
-        # Process user data:
-        df = pd.read_csv(
-            self.raw_paths[1],
-            sep='::',
-            header=None,
-            index_col='userId',
-            names=self.USER_HEADERS,
-            dtype='str',
-            encoding='ISO-8859-1',
-            engine='python',
-        )
-        user_mapping = {idx: i for i, idx in enumerate(df.index)}
-
-        age = df['age'].str.get_dummies().values.argmax(axis=1)[:, None]
-        age = torch.from_numpy(age).to(torch.float)
-
-        gender = df['gender'].str.get_dummies().values[:, 0][:, None]
-        gender = torch.from_numpy(gender).to(torch.float)
-
-        occupation = df['occupation'].str.get_dummies().values.argmax(axis=1)[:, None]
-        occupation = torch.from_numpy(occupation).to(torch.float)
-
-        data['user'].x = torch.cat([age, gender, occupation], dim=-1)
-
-        self.int_user_data = df
-
-        # Process rating data:
-        df = pd.read_csv(
-            self.raw_paths[2],
-            sep='::',
-            header=None,
-            names=self.RATING_HEADERS,
-            encoding='ISO-8859-1',
-            engine='python',
-        )
-
-        src = [user_mapping[idx] for idx in df['userId']]
-        dst = [movie_mapping[idx] for idx in df['movieId']]
-        edge_index = torch.tensor([src, dst])
-        data['user', 'rates', 'movie'].edge_index = edge_index
-
-        rating = torch.from_numpy(df['rating'].values).to(torch.long)
-        data['user', 'rates', 'movie'].rating = rating
-
-        time = torch.from_numpy(df['timestamp'].values)
-        data['user', 'rates', 'movie'].time = time
-
-        data['movie', 'rated_by', 'user'].edge_index = edge_index.flip([0])
-        data['movie', 'rated_by', 'user'].rating = rating
-        data['movie', 'rated_by', 'user'].time = time
-
-        if self.pre_transform is not None:
-            data = self.pre_transform(data)
-
-        self.save([data], self.processed_paths[0])
+from edge_rec.datasets.movie_lens import RawMovieLens1M, RawMovieLens100K
 
 
 class CoreMovieLensDataset:
@@ -263,7 +34,8 @@ class CoreMovieLensDataset:
             test_split=test_split
         )
 
-        (self.user_train_review_count, self.user_all_review_count), (self.movie_train_review_count, self.movie_all_review_count) = self._build_review_count()
+        (self.user_train_review_count, self.user_all_review_count), (
+            self.movie_train_review_count, self.movie_all_review_count) = self._build_review_count()
 
         self.top_users, self.top_movies = self._build_density_scores(self.all_edges, self.n_users, self.n_movies)
 
@@ -329,9 +101,9 @@ class CoreMovieLensDataset:
 
     @staticmethod
     def _count_unique(edges, col, n_unique):
-        count = torch.tensor(np.column_stack(np.unique(edges[0][:,col], axis=0, return_counts=True)))
+        count = torch.tensor(np.column_stack(np.unique(edges[0][:, col], axis=0, return_counts=True)))
         out = torch.zeros(n_unique)
-        out[count[:,0]] = count[:,1].float()
+        out[count[:, 0]] = count[:, 1].float()
         return out
 
     def _build_review_count(self):
@@ -339,11 +111,11 @@ class CoreMovieLensDataset:
         user_edge_count = [self._count_unique(edges, 0, self.n_users) for edges in edge_sets]
         movie_edge_count = [self._count_unique(edges, 1, self.n_movies) for edges in edge_sets]
         return user_edge_count, movie_edge_count
-    
+
     def _construct_review_features(self, review_count):
-        x = review_count.reshape((-1,1))
+        x = review_count.reshape((-1, 1))
         log_x = torch.log(x)
-        log_x_squared = log_x**2
+        log_x_squared = log_x ** 2
         out = torch.cat([log_x, log_x_squared], axis=1)
         return out
 
@@ -364,7 +136,7 @@ class CoreMovieLensDataset:
     def get_subgraph(self, subgraph_size, target_density,
                      include_train_edges=True, include_test_edges=True,
                      *, include_separate_train_test_ratings=False,
-                     mask_unknown_ratings=True, 
+                     mask_unknown_ratings=True,
                      include_review_count_feats=True, debug=False):
         if subgraph_size is None:
             subgraph_size = (self.n_users, self.n_movies)
@@ -431,13 +203,14 @@ class CoreMovieLensDataset:
         movies = repeat(movies, 'm f -> f n m', n=n_users_sampled).float()
 
         targets = mask if self.return_binary_targets else ratings
-        mask = torch.ones_like(mask).to(mask.device) if self.return_binary_targets or not mask_unknown_ratings else mask #do not mask if predicting binary interactions
+        mask = torch.ones_like(mask).to(
+            mask.device) if self.return_binary_targets or not mask_unknown_ratings else mask  # do not mask if predicting binary interactions
 
         ret = torch.cat([targets, movies, users, mask], dim=0)
         if include_separate_train_test_ratings:
             train_ratings = self._slice_edges(self.train_edges, user_inds, movie_inds)
             test_ratings = self._slice_edges(self.test_edges, user_inds, movie_inds)
-            
+
             train_ratings = (train_ratings != 0).float() if self.return_binary_targets else train_ratings
             test_ratings = (test_ratings != 0).float() if self.return_binary_targets else test_ratings
             ret = ret, train_ratings, test_ratings
@@ -479,7 +252,7 @@ class MovieLensDatasetWrapper(IterableDataset):
                 include_test_edges=True,
                 include_separate_train_test_ratings=True
             )
-        
+
         return self.dataset.get_subgraph(
             subgraph_size=None,
             target_density=None,
@@ -699,6 +472,9 @@ class FullGraphSampler(IterableDataset):
     def __iter__(self):
         return self
 
+
 if __name__ == "__main__":
     dataset = CoreMovieLensDataset("movie_lens/data/", ml_100k=False)
-    import pdb; pdb.set_trace()
+    import pdb;
+
+    pdb.set_trace()
