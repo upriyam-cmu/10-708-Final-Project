@@ -1,8 +1,41 @@
 from .base import AttentionBase, SelfAttention
 
-from einops import rearrange, repeat
+from einops import rearrange, reduce, repeat
 import torch
 from torch import nn
+
+
+def _rcsa_forward(attn, x, row_ft, col_ft):
+    """
+    x: Tensor(shape=(b, c, n, m))
+    row_ft: Tensor(shape=(b, n, f1))
+    col_ft: Tensor(shape=(b, m, f2))
+    """
+    _, _, n, m = x.shape
+
+    # row attn
+    q, k, v = (
+        rearrange(row_ft, 'b n f -> b f 1 n'),
+        repeat(col_ft, 'b m f -> b f m n', n=n),
+        rearrange(x, 'b c n m -> b c m n'),
+    )
+    row_attn = attn.attn_row(q, k, v)  # shape = (b, c, 1, n)
+
+    # col attn
+    q, k, v = (
+        rearrange(col_ft, 'b m f -> b f 1 m'),
+        repeat(row_ft, 'b n f -> b f n m', m=m),
+        x,  # already (b, c, n, m)
+    )
+    col_attn = attn.attn_col(q, k, v)  # shape = (b, c, 1, m)
+
+    # reshape components
+    row_attn = repeat(row_attn, 'b c 1 n -> b c n m', m=m)
+    col_attn = repeat(col_attn, 'b c 1 m -> b c n m', n=n)
+
+    # stack results & reduce
+    merged = torch.cat([row_attn, col_attn], dim=1)
+    return attn.reduce(merged)
 
 
 class Stacked1DSelfAttention(nn.Module):
@@ -14,22 +47,37 @@ class Stacked1DSelfAttention(nn.Module):
             num_mem_kv=4,
             flash=False,
             share_weights=True,
+            speed_hack=True,
             **kwargs,
     ):
         super().__init__()
 
-        self.attn1 = SelfAttention(
-            dim=dim,
-            heads=heads,
-            dim_head=dim_head,
-            num_mem_kv=num_mem_kv,
-            flash=flash,
-        )
+        self.speed_hack = speed_hack
+        if speed_hack:
+            self.attn_row = AttentionBase(
+                d_q=dim,
+                d_k=dim,
+                d_v=dim,
+                heads=heads,
+                dim_head=dim_head,
+                num_mem_kv=num_mem_kv,
+                flash=flash,
+            )
 
-        if share_weights:
-            self.attn2 = self.attn1
+            if share_weights:
+                self.attn_col = self.attn_row
+            else:
+                self.attn_col = AttentionBase(
+                    d_q=dim,
+                    d_k=dim,
+                    d_v=dim,
+                    heads=heads,
+                    dim_head=dim_head,
+                    num_mem_kv=num_mem_kv,
+                    flash=flash,
+                )
         else:
-            self.attn2 = SelfAttention(
+            self.attn_row = SelfAttention(
                 dim=dim,
                 heads=heads,
                 dim_head=dim_head,
@@ -37,28 +85,52 @@ class Stacked1DSelfAttention(nn.Module):
                 flash=flash,
             )
 
-        assert self.attn1.out_dim == self.attn2.out_dim == dim
+            if share_weights:
+                self.attn_col = self.attn_row
+            else:
+                self.attn_col = SelfAttention(
+                    dim=dim,
+                    heads=heads,
+                    dim_head=dim_head,
+                    num_mem_kv=num_mem_kv,
+                    flash=flash,
+                )
+
+        assert self.attn_row.out_dim == self.attn_col.out_dim == dim
         self.reduce = nn.Conv2d(2 * dim, dim, 1, bias=False)
 
     def forward(self, x, mask=None):
-        """
-        Given all tensor arguments of attention (shape=(b, f, n, m)),
-        do attn row/col wise independently, then stack results.
-        """
-        # apply attn over rows
-        row_attn = self.attn1(x, mask=mask)
+        if self.speed_hack:
+            """
+            x: Tensor(shape=(b, c, n, m))
+            row_ft: Tensor(shape=(b, n, c))
+            col_ft: Tensor(shape=(b, m, c))
+            """
+            if mask is not None:
+                x = x.masked_fill(mask, 0.)
+                mask = mask.to(dtype=x.dtype)
+                row_ft = reduce(x, 'b c n m -> b n c', 'sum') / (reduce(mask, 'n m -> 1 n 1', 'sum') + 1e-7)
+                col_ft = reduce(x, 'b c n m -> b m c', 'sum') / (reduce(mask, 'n m -> 1 m 1', 'sum') + 1e-7)
+            else:
+                row_ft = reduce(x, 'b c n m -> b n c', 'mean')
+                col_ft = reduce(x, 'b c n m -> b m c', 'mean')
 
-        # transpose arguments
-        x = x.transpose(-1, -2)
-        if mask is not None:
-            mask = mask.transpose(-1, -2)
+            return _rcsa_forward(self, x, row_ft, col_ft)
+        else:
+            # apply attn over rows
+            row_attn = self.attn_row(x, mask=mask)
 
-        # apply attn over cols
-        col_attn = self.attn2(x, mask=mask).transpose(-1, -2)
+            # transpose arguments
+            x = x.transpose(-1, -2)
+            if mask is not None:
+                mask = mask.transpose(-1, -2)
 
-        # stack results & reduce
-        merged = torch.cat([row_attn, col_attn], dim=1)
-        return self.reduce(merged)
+            # apply attn over cols
+            col_attn = self.attn_col(x, mask=mask).transpose(-1, -2)
+
+            # stack results & reduce
+            merged = torch.cat([row_attn, col_attn], dim=1)
+            return self.reduce(merged)
 
 
 class SeparableCrossAttention(nn.Module):
@@ -109,33 +181,4 @@ class SeparableCrossAttention(nn.Module):
         self.reduce = nn.Conv2d(2 * d_channel, d_channel, 1, bias=False)
 
     def forward(self, x, row_ft, col_ft):
-        """
-        x: Tensor(shape=(b, c, n, m))
-        row_ft: Tensor(shape=(b, n, f1))
-        col_ft: Tensor(shape=(b, m, f2))
-        """
-        _, _, n, m = x.shape
-
-        # row attn
-        q, k, v = (
-            rearrange(row_ft, 'b n f -> b f 1 n'),
-            repeat(col_ft, 'b m f -> b f m n', n=n),
-            rearrange(x, 'b c n m -> b c m n'),
-        )
-        row_attn = self.attn_row(q, k, v)  # shape = (b, c, 1, n)
-
-        # col attn
-        q, k, v = (
-            rearrange(col_ft, 'b m f -> b f 1 m'),
-            repeat(row_ft, 'b n f -> b f n m', m=m),
-            x,  # already (b, c, n, m)
-        )
-        col_attn = self.attn_col(q, k, v)  # shape = (b, c, 1, m)
-
-        # reshape components
-        row_attn = repeat(row_attn, 'b c 1 n -> b c n m', m=m)
-        col_attn = repeat(col_attn, 'b c 1 m -> b c n m', n=n)
-
-        # stack results & reduce
-        merged = torch.cat([row_attn, col_attn], dim=1)
-        return self.reduce(merged)
+        return _rcsa_forward(self, x, row_ft, col_ft)
