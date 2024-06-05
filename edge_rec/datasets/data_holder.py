@@ -1,6 +1,9 @@
+from .transforms import Transform
+
 from abc import ABC, abstractmethod
 from collections import namedtuple
 from functools import partial
+from typing import Optional
 
 from torch.utils.data import IterableDataset
 
@@ -33,6 +36,13 @@ class DataHolder(ABC):
 
         assert processed_data_path.exists(), f"Failed to load {dataset_class} dataset"
         self.processed_data_path = str(processed_data_path)
+
+    @staticmethod
+    def _get_transform(possible_augmentations=None, transform_key=None) -> Optional[Transform]:
+        if possible_augmentations is not None and transform_key in possible_augmentations:
+            return possible_augmentations[transform_key] or Transform.Identity()
+        else:
+            return None
 
     @abstractmethod
     def get_subgraph(

@@ -257,7 +257,7 @@ class CrossAttention(nn.Module):
 class Stacked1DAttention(nn.Module):
     def __init__(self, attn, *args, **kwargs):
         super().__init__()
-        self.attn = attn(*args, **kwargs) if len(args) + len(kwargs) > 0 else attn
+        self.attn = attn(*args, **kwargs) if isinstance(attn, type) else attn
         self.reduce = nn.Conv2d(2 * self.attn.out_dim, self.attn.out_dim, 1, bias=False)
 
     def forward(self, *tensors, **kwargs):
