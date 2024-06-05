@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 from einops import rearrange, repeat
 
-from edge_rec.pipe import *
+from edge_rec.utils.pipe import pipe, forall, T
 
 # constants
 

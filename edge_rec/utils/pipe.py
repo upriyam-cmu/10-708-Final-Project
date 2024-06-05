@@ -1,6 +1,5 @@
-import torch as __torch
-
-from einops import rearrange as __rearrange
+from einops import rearrange
+import torch
 
 
 class pipe:
@@ -21,16 +20,16 @@ class pipe:
 
 def modulate(scale, shift=None):
     def _modify(x):
-        x = x * (__torch.cat(scale, dim=1) if type(scale) == tuple else scale)
+        x = x * (torch.cat(scale, dim=1) if type(scale) == tuple else scale)
         if shift is not None:
-            x = x + (__torch.cat(shift, dim=1) if type(shift) == tuple else shift)
+            x = x + (torch.cat(shift, dim=1) if type(shift) == tuple else shift)
         return x
 
     return _modify
 
 
 def idx(spec, **lengths):
-    return lambda x: __rearrange(x, spec, **lengths)
+    return lambda x: rearrange(x, spec, **lengths)
 
 
 def toi(x):
@@ -38,9 +37,9 @@ def toi(x):
 
 
 def assert_in(low, high):
-    def _check(x: __torch.Tensor):
+    def _check(x: torch.Tensor):
         n_low, n_high = (~(low <= x)).sum(), (~(x < high)).sum()
-        assert n_low == 0 and n_high == 0, f"n_low={n_low}, n_high={n_high}, min={__torch.min(x)}, max={__torch.max(x)}"
+        assert n_low == 0 and n_high == 0, f"n_low={n_low}, n_high={n_high}, min={torch.min(x)}, max={torch.max(x)}"
         return x
 
     return _check

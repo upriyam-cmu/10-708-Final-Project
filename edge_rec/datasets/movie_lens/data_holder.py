@@ -40,8 +40,8 @@ class MovieLensDataHolder(DataHolder):
 
         # load user/movie features
         self.user_data, self.movie_data, self.n_users, self.n_movies = self._get_features(
-            data['user']['x'].int(),
-            data['movie']['x'].int(),
+            data['user']['x'],
+            data['movie']['x'],
         )
         self._augment_features(self.train_edges)
 
@@ -77,17 +77,17 @@ class MovieLensDataHolder(DataHolder):
     def _get_features(user_data_tensor, movie_data_tensor):
         assert len(user_data_tensor.shape) == 2 and user_data_tensor.shape[-1] == 3
         user_data = {
-            'age': user_data_tensor[:, 0],
-            'gender': user_data_tensor[:, 1],
-            'occupation': user_data_tensor[:, 2],
+            'age': user_data_tensor[:, 0].int(),
+            'gender': user_data_tensor[:, 1].int(),
+            'occupation': user_data_tensor[:, 2].int(),
         }
 
         assert len(movie_data_tensor.shape) == 2 and movie_data_tensor.shape[-1] == 6
-        genre_multihot = torch.zeros(len(movie_data_tensor), 19, device=movie_data_tensor.device, dtype=torch.bool)
-        genre_multihot.scatter_(1, movie_data_tensor.long(), 1)
+        genre_multihot = torch.zeros(len(movie_data_tensor), 19, device=movie_data_tensor.device)
+        genre_multihot.scatter_(1, movie_data_tensor.long(), 1.)
         movie_data = {
-            'genre_ids': movie_data_tensor,
-            'genre_multihot': genre_multihot[:, 1:],  # drop genre idx=0 (i.e. null genre?)
+            'genre_ids': movie_data_tensor.int(),
+            'genre_multihot': genre_multihot[:, 1:].int(),  # drop genre idx=0 (i.e. null genre?)
         }
 
         return user_data, movie_data, len(user_data_tensor), len(movie_data_tensor)
