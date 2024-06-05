@@ -1,75 +1,27 @@
-from functools import partial, wraps
-from packaging import version
 from collections import namedtuple
+from functools import partial
+from packaging import version
 
+from einops import rearrange, repeat
 import torch
 from torch import nn, einsum
 import torch.nn.functional as F
-
-from einops import rearrange, repeat
-
-from edge_rec.utils.pipe import pipe, forall, T
 
 # constants
 
 AttentionConfig = namedtuple('AttentionConfig', ['enable_flash', 'enable_math', 'enable_mem_efficient'])
 
 
-# helpers
-
-def exists(val):
-    return val is not None
-
-
-def default(val, d):
-    return val if exists(val) else d
-
-
-def once(fn):
-    called = False
-
-    @wraps(fn)
-    def inner(x):
-        nonlocal called
-        if called:
-            return
-        called = True
-        return fn(x)
-
-    return inner
-
-
-print_once = once(print)
-
-
-# small helper modules
-
-class RMSNorm(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.g = nn.Parameter(torch.ones(1, dim, 1, 1))
-
-    def forward(self, x):
-        return F.normalize(x, dim=1) * self.g * (x.shape[1] ** 0.5)
-
-
-# main class
-
 class Attend(nn.Module):
-    def __init__(
-            self,
-            dropout=0.,
-            flash=False,
-            scale=None
-    ):
+    def __init__(self, dropout=0., flash=False, scale=None):
         super().__init__()
         self.dropout = dropout
         self.scale = scale
         self.attn_dropout = nn.Dropout(dropout)
 
         self.flash = flash
-        assert not (flash and version.parse(torch.__version__) < version.parse(
-            '2.0.0')), 'in order to use flash attention, you must be using pytorch 2.0 or above'
+        assert not (flash and version.parse(torch.__version__) < version.parse('2.0.0')), \
+            "In order to use flash attention, you must be using pytorch 2.0 or above"
 
         # determine efficient attention configs for cuda and cpu
 
@@ -82,21 +34,20 @@ class Attend(nn.Module):
         device_properties = torch.cuda.get_device_properties(torch.device('cuda'))
 
         if device_properties.major == 8 and device_properties.minor == 0:
-            print_once('A100 GPU detected, using flash attention if input tensor is on cuda')
             self.cuda_config = AttentionConfig(True, False, False)
         else:
-            print_once('Non-A100 GPU detected, using math or mem efficient attention if input tensor is on cuda')
             self.cuda_config = AttentionConfig(False, True, True)
 
     def flash_attn(self, q, k, v, m=None):
-        _, heads, q_len, _, k_len, is_cuda, device = *q.shape, k.shape[-2], q.is_cuda, q.device
+        # _, heads, q_len, _, k_len, is_cuda, device = *q.shape, k.shape[-2], q.is_cuda, q.device
+        is_cuda = q.is_cuda
 
-        if exists(self.scale):
+        if self.scale is not None:
             default_scale = q.shape[-1]
             q = q * (self.scale / default_scale)
 
         q, k, v = map(lambda t: t.contiguous(), (q, k, v))
-        if exists(m):
+        if m is not None:
             m = m.contiguous()
 
         # Check if there is a compatible device for flash attention
@@ -123,17 +74,15 @@ class Attend(nn.Module):
         d - feature dimension
         """
 
-        q_len, k_len, device = q.shape[-2], k.shape[-2], q.device
-
         if self.flash:
             return self.flash_attn(q, k, v, m)
 
-        scale = default(self.scale, q.shape[-1] ** -0.5)
+        scale = self.scale if self.scale is not None else q.shape[-1] ** -0.5
 
         # similarity
 
         sim = einsum(f"b h i d, b h j d -> b h i j", q, k) * scale
-        if exists(m):
+        if m is not None:
             sim = sim.masked_fill_(~m, float('-inf'))
 
         # attention
@@ -151,11 +100,12 @@ class Attend(nn.Module):
 class AttentionBase(nn.Module):
     def __init__(
             self,
-            d_qk, d_v,
+            d_q, d_k, d_v,
             heads=4,
             dim_head=32,
             num_mem_kv=4,
-            flash=False
+            flash=False,
+            **kwargs,
     ):
         super().__init__()
         self.heads = heads
@@ -166,8 +116,8 @@ class AttentionBase(nn.Module):
 
         self.mem_mask = nn.Parameter(torch.ones(1, 1, num_mem_kv).bool(), requires_grad=False)
         self.mem_kv = nn.Parameter(torch.randn(2, heads, num_mem_kv, dim_head))
-        self.to_q = nn.Conv2d(d_qk, hidden_dim, 1, bias=False)
-        self.to_k = nn.Conv2d(d_qk, hidden_dim, 1, bias=False)
+        self.to_q = nn.Conv2d(d_q, hidden_dim, 1, bias=False)
+        self.to_k = nn.Conv2d(d_k, hidden_dim, 1, bias=False)
         self.to_v = nn.Conv2d(d_v, hidden_dim, 1, bias=False)
         self.to_out = nn.Conv2d(hidden_dim, d_v, 1)
 
@@ -177,15 +127,14 @@ class AttentionBase(nn.Module):
         bv, cv, nv, mv = v.shape
 
         assert bq == bk == bv
-        assert cq == ck
-        assert nq == nk == nv
+        assert nk == nv
         assert mq == mk == mv
 
         b, c, x, y = v.shape
 
         q, k, v = self.to_q(q), self.to_k(k), self.to_v(v)
         q, k, v = map(lambda t: rearrange(t, 'b (h f) x y -> (b y) h x f', h=self.heads), (q, k, v))
-        if exists(mask):
+        if mask is not None:
             assert mask.shape == (b, x, y)
             mem_mask = repeat(self.mem_mask, 'h n d -> b h n d', b=b * y)
             mask = rearrange(mask, 'b x y -> (b y) 1 1 x')
@@ -207,16 +156,18 @@ class SelfAttention(nn.Module):
             heads=4,
             dim_head=32,
             num_mem_kv=4,
-            flash=False
+            flash=False,
+            **kwargs,
     ):
         super().__init__()
         self.attn = AttentionBase(
-            d_qk=dim,
+            d_q=dim,
+            d_k=dim,
             d_v=dim,
             heads=heads,
             dim_head=dim_head,
             num_mem_kv=num_mem_kv,
-            flash=flash
+            flash=flash,
         )
 
     def forward(self, x, mask=None):
@@ -234,16 +185,18 @@ class CrossAttention(nn.Module):
             heads=4,
             dim_head=32,
             num_mem_kv=4,
-            flash=False
+            flash=False,
+            **kwargs,
     ):
         super().__init__()
         self.attn = AttentionBase(
-            d_qk=d_qk,
+            d_q=d_qk,
+            d_k=d_qk,
             d_v=d_v,
             heads=heads,
             dim_head=dim_head,
             num_mem_kv=num_mem_kv,
-            flash=flash
+            flash=flash,
         )
 
     def forward(self, qk, v, mask=None):
@@ -252,21 +205,3 @@ class CrossAttention(nn.Module):
     @property
     def out_dim(self):
         return self.attn.out_dim
-
-
-class Stacked1DAttention(nn.Module):
-    def __init__(self, attn, *args, **kwargs):
-        super().__init__()
-        self.attn = attn(*args, **kwargs) if isinstance(attn, type) else attn
-        self.reduce = nn.Conv2d(2 * self.attn.out_dim, self.attn.out_dim, 1, bias=False)
-
-    def forward(self, *tensors, **kwargs):
-        """
-        Given all tensor arguments of attention (shape=(b, f, n, m)),
-        do attn row/col wise independently, then stack results.
-        """
-        attn = partial(self.attn, **kwargs)
-        row_attn = pipe(*tensors) | attn | pipe.extract
-        col_attn = pipe(*tensors) | forall(T) | attn | forall(T) | pipe.extract
-        merged = torch.cat([row_attn, col_attn], dim=1)
-        return self.reduce(merged)

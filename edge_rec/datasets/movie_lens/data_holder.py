@@ -159,9 +159,9 @@ class MovieLensDataHolder(DataHolder):
         int_ratings = ratings
         ratings = ratings.float()
         if ratings_transform is not None:
-            ratings[mask] = ratings_transform(int_ratings[mask])
+            ratings[mask] = ratings_transform(int_ratings[mask]).float()
         # return
-        return ratings, mask
+        return ratings.unsqueeze(dim=0), mask
 
     @staticmethod
     def slice_features(features, indices):

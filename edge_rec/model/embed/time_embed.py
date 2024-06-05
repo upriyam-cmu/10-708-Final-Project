@@ -1,6 +1,4 @@
-from ..utils import divisible_by
-
-from abc import ABC
+from abc import ABC, abstractmethod
 import math
 
 from einops import rearrange
@@ -9,13 +7,16 @@ from torch import nn
 
 
 class TimeEmbedder(nn.Module, ABC):
-    pass
+    @property
+    @abstractmethod
+    def out_dim(self):
+        pass
 
 
 class SinusoidalPositionalEmbedding(TimeEmbedder):
     def __init__(self, dim, theta=10000):
         super().__init__()
-        assert divisible_by(dim, 2)
+        dim = dim + dim % 2  # make dim even
         self.dim = dim
         self.theta = theta
 
@@ -28,6 +29,10 @@ class SinusoidalPositionalEmbedding(TimeEmbedder):
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
         return emb
 
+    @property
+    def out_dim(self):
+        return self.dim
+
 
 class RandomOrLearnedSinusoidalPositionalEmbedding(TimeEmbedder):
     """ following @crowsonkb 's lead with random (learned optional) sinusoidal pos emb """
@@ -35,10 +40,8 @@ class RandomOrLearnedSinusoidalPositionalEmbedding(TimeEmbedder):
 
     def __init__(self, dim, is_random=False):
         super().__init__()
-        assert divisible_by(dim, 2)
-        half_dim = dim // 2
-        self.dim = dim + 1
-        self.weights = nn.Parameter(torch.randn(half_dim), requires_grad=not is_random)
+        self.dim = dim + dim % 2  # make dim even
+        self.weights = nn.Parameter(torch.randn(self.dim // 2), requires_grad=not is_random)
 
     def forward(self, x):
         x = rearrange(x, 'b -> b 1')
@@ -46,3 +49,7 @@ class RandomOrLearnedSinusoidalPositionalEmbedding(TimeEmbedder):
         fouriered = torch.cat((freqs.sin(), freqs.cos()), dim=-1)
         fouriered = torch.cat((x, fouriered), dim=-1)
         return fouriered
+
+    @property
+    def out_dim(self):
+        return self.dim + 1

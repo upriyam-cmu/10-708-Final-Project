@@ -94,9 +94,10 @@ class RatingsTransform:
             return ratings * scale + shift
 
     class ToGaussian(Transform):
-        def __init__(self, possible_ratings=(1, 2, 3, 4, 5), output_range=(-1, 1)):
+        def __init__(self, possible_ratings=(1, 2, 3, 4, 5), output_range=(-1, 1), add_noise=True):
             self.possible_ratings = np.array(possible_ratings)
             self.output_range = output_range
+            self.add_noise = add_noise
 
             anchor_ratings = np.zeros(2 * len(self.possible_ratings) + 1)
             anchor_ratings[1::2] = self.possible_ratings
@@ -128,6 +129,25 @@ class RatingsTransform:
             assert 0 - 1e-7 <= self.anchor_quantiles.min() and self.anchor_quantiles.max() <= 1 + 1e-7, \
                 f"min={self.anchor_quantiles.min()}, max={self.anchor_quantiles.max()}"
 
+        @staticmethod
+        def _rand(shape, uniform=False, normal=False):
+            assert np.sum([uniform, normal]) == 1, "Must specify exactly one distribution type"
+            size = np.prod(shape)
+
+            if uniform:
+                return np.random.rand(size).reshape(shape)
+
+            if normal:
+                acc = []
+                while size > 0:
+                    rand = np.random.randn(size) / 3
+                    rand = rand[(-1 <= rand) & (rand <= 1)]
+                    acc.append(rand)
+                    size -= len(rand)
+                return (np.concatenate(acc).reshape(shape) + 1) / 2
+
+            assert False, "unreachable"
+
         def apply(self, ratings, *, numpy=False, **kwargs):
             if self.anchor_quantiles is None:
                 raise ValueError(f"Cannot apply {self.__class__} without fitting to distribution first")
@@ -136,10 +156,17 @@ class RatingsTransform:
                 device = ratings.device
                 ratings = ratings.detach().cpu().numpy()
 
-            uniform_quantiles = np.zeros_like(ratings)
-            bin_midpoints = self.anchor_quantiles[1::2]
-            for v, bin_q in zip(self.possible_ratings, bin_midpoints):
-                uniform_quantiles[ratings == v] = bin_q
+            uniform_quantiles = np.zeros(ratings.shape)
+            if self.add_noise:
+                bin_edges = self.anchor_quantiles[0::2]
+                noise_0to1 = self._rand(uniform_quantiles.shape, normal=True)
+                for v, low_q, high_q in zip(self.possible_ratings, bin_edges[:-1], bin_edges[1:]):
+                    mask = (ratings == v)
+                    uniform_quantiles[mask] = low_q + noise_0to1[mask] * (high_q - low_q)
+            else:
+                bin_midpoints = self.anchor_quantiles[1::2]
+                for v, bin_q in zip(self.possible_ratings, bin_midpoints):
+                    uniform_quantiles[ratings == v] = bin_q
 
             normal_quantiles = np.clip((inv_normal_cdf(uniform_quantiles) + 3) / 6, 0, 1)
 
