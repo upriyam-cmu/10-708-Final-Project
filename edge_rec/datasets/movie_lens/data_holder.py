@@ -1,7 +1,7 @@
 from .ml1m import RawMovieLens1M
 from .ml100k import RawMovieLens100K
 
-from ..data_holder import DataHolder, RatingSubGraphData
+from ..data_holder import DataHolder, RatingSubgraphData
 from ..transforms import Transform
 
 from functools import partial
@@ -151,17 +151,30 @@ class MovieLensDataHolder(DataHolder):
         return sliced
 
     @staticmethod
-    def get_ratings_and_mask(edges, user_inds, movie_inds, ratings_transform: Transform = None):
+    def get_ratings_and_mask(*all_edges, user_inds, movie_inds, ratings_transform: Transform = None):
+        if len(all_edges) == 0:
+            # no edges to select
+            return None, None
+
+        # merge all edge groups together
+        all_ids, all_ratings = [], []
+        for (ids, ratings) in all_edges:
+            all_ids.append(ids)
+            all_ratings.append(ratings)
+        edges = np.concatenate(all_ids, axis=0), np.concatenate(all_ratings, axis=0)
+
         # get ratings
         ratings = MovieLensDataHolder.slice_edges(edges, user_inds, movie_inds)  # shape = (n, m)
         mask = (ratings != 0)
+
         # transform ratings
         int_ratings = ratings
         ratings = ratings.float()
         if ratings_transform is not None:
             ratings[mask] = ratings_transform(int_ratings[mask]).float()
+
         # return
-        return ratings.unsqueeze(dim=0), mask
+        return ratings.unsqueeze(dim=0), mask.unsqueeze(dim=0)
 
     @staticmethod
     def slice_features(features, indices):
@@ -177,7 +190,7 @@ class MovieLensDataHolder(DataHolder):
             *,
             return_train_edges: bool = True,
             return_test_edges: bool = True,
-    ) -> RatingSubGraphData:
+    ) -> RatingSubgraphData:
         if subgraph_size is None:
             subgraph_size = (self.n_users, self.n_movies)
         else:
@@ -213,36 +226,26 @@ class MovieLensDataHolder(DataHolder):
                 p=random_weights,
             )
 
+        edges_to_include = []
         if return_train_edges:
-            train_ratings, train_mask = self.get_ratings_and_mask(
-                edges=self.train_edges,
-                user_inds=user_inds,
-                movie_inds=movie_inds,
-                ratings_transform=self.ratings_transform,
-            )
-        else:
-            train_ratings, train_mask = None, None
-
+            edges_to_include.append(self.train_edges)
         if return_test_edges:
-            test_ratings, test_mask = self.get_ratings_and_mask(
-                edges=self.test_edges,
-                user_inds=user_inds,
-                movie_inds=movie_inds,
-                ratings_transform=self.ratings_transform,
-            )
-        else:
-            test_ratings, test_mask = None, None
+            edges_to_include.append(self.test_edges)
+
+        ratings, known_mask = self.get_ratings_and_mask(
+            *edges_to_include,
+            user_inds=user_inds,
+            movie_inds=movie_inds,
+            ratings_transform=self.ratings_transform,
+        )
 
         user_features = self.slice_features(self.user_data, user_inds)
         movie_features = self.slice_features(self.movie_data, movie_inds)
 
-        return RatingSubGraphData(
-            # ratings
-            train_ratings=train_ratings,
-            test_ratings=test_ratings,
-            # masks
-            train_mask=train_mask,
-            test_mask=test_mask,
+        return RatingSubgraphData(
+            # edge data
+            ratings=ratings,
+            known_mask=known_mask,
             # features
             user_features=user_features,
             product_features=movie_features,

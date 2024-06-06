@@ -201,12 +201,12 @@ class RatingsTransform:
 
 
 class FeatureTransform:
-    class LogPolyTransform(Transform):
+    class LogPolynomial(Transform):
         def __init__(self, degree):
             self.degree = degree
 
         def apply(self, feature, **kwargs):
-            feature = torch.log(feature)
+            feature = torch.log(feature + 0.5)
             return torch.cat([
                 feature ** (p + 1)
                 for p in range(self.degree)

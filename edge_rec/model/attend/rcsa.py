@@ -100,17 +100,19 @@ class Stacked1DSelfAttention(nn.Module):
         self.reduce = nn.Conv2d(2 * dim, dim, 1, bias=False)
 
     def forward(self, x, mask=None):
+        """
+        x: Tensor(shape=(b, c, n, m))
+        mask: Tensor(shape=(b, n, m))
+
+        row_ft: Tensor(shape=(b, n, c))
+        col_ft: Tensor(shape=(b, m, c))
+        """
         if self.speed_hack:
-            """
-            x: Tensor(shape=(b, c, n, m))
-            row_ft: Tensor(shape=(b, n, c))
-            col_ft: Tensor(shape=(b, m, c))
-            """
             if mask is not None:
                 x = x.masked_fill(mask, 0.)
                 mask = mask.to(dtype=x.dtype)
-                row_ft = reduce(x, 'b c n m -> b n c', 'sum') / (reduce(mask, 'n m -> 1 n 1', 'sum') + 1e-7)
-                col_ft = reduce(x, 'b c n m -> b m c', 'sum') / (reduce(mask, 'n m -> 1 m 1', 'sum') + 1e-7)
+                row_ft = reduce(x, 'b c n m -> b n c', 'sum') / (reduce(mask, 'b 1 n m -> b n 1', 'sum') + 1e-7)
+                col_ft = reduce(x, 'b c n m -> b m c', 'sum') / (reduce(mask, 'b 1 n m -> b m 1', 'sum') + 1e-7)
             else:
                 row_ft = reduce(x, 'b c n m -> b n c', 'mean')
                 col_ft = reduce(x, 'b c n m -> b m c', 'mean')

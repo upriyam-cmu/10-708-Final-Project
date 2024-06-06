@@ -135,9 +135,9 @@ class AttentionBase(nn.Module):
         q, k, v = self.to_q(q), self.to_k(k), self.to_v(v)
         q, k, v = map(lambda t: rearrange(t, 'b (h f) x y -> (b y) h x f', h=self.heads), (q, k, v))
         if mask is not None:
-            assert mask.shape == (b, x, y)
+            assert mask.shape == (b, 1, x, y)
             mem_mask = repeat(self.mem_mask, 'h n d -> b h n d', b=b * y)
-            mask = rearrange(mask, 'b x y -> (b y) 1 1 x')
+            mask = rearrange(mask, 'b 1 x y -> (b y) 1 1 x')
             mask = torch.cat((mem_mask, mask), dim=-1)
 
         mk, mv = map(lambda t: repeat(t, 'h n d -> b h n d', b=b * y), self.mem_kv)
