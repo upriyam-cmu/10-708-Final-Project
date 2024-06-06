@@ -15,7 +15,16 @@ from ema_pytorch import EMA
 
 from accelerate import Accelerator
 
-from typing import Optional, Tuple
+from typing import Optional, Tuple, TypeVar, Union
+
+__CopyArgTypes = TypeVar('__CopyArgTypes')
+
+
+def _prepare(accelerator: Accelerator, args: __CopyArgTypes) -> __CopyArgTypes:
+    if isinstance(args, (tuple, list)):
+        return accelerator.prepare(*args)
+    else:
+        return accelerator.prepare(args)
 
 
 def _get_dataloader(dataset: Optional[Dataset], batch_size: int, accelerator: Optional[Accelerator] = None):
@@ -30,7 +39,7 @@ def _get_dataloader(dataset: Optional[Dataset], batch_size: int, accelerator: Op
         num_workers=cpu_count(),
     )
     if accelerator is not None:
-        loader = accelerator.prepare(loader)
+        loader = _prepare(accelerator, loader)
     while True:
         for data in loader:
             yield data
@@ -137,7 +146,7 @@ class Trainer(object):
 
         # prepare model, dataloader, optimizer with accelerator
 
-        self.model, self.optim = self.accelerator.prepare(self.model, self.optim)
+        self.model, self.optim = _prepare(self.accelerator, (self.model, self.optim))
 
     @property
     def device(self):
@@ -236,17 +245,39 @@ class Trainer(object):
 
         accelerator.print('training complete')
 
-    def eval(self, milestone=None, full_graph=None, batch_size=16, subgraph_size=(128, 128), do_inpaint_sampling=False):
-        # TODO fix eval fn
+    def eval(
+            self,
+            rating_data: RatingSubgraphData,
+            milestone: Optional[int] = None,
+            tiled_sampling: bool = False,
+            batch_size: Optional[int] = None,
+            subgraph_size: Optional[Union[int, Tuple[int, int]]] = None,
+            do_inpainting_sampling: bool = False,
+            silence_inner_tqdm: bool = False,
+    ) -> torch.Tensor:
         if milestone is not None:
             self.load(milestone)
-        if full_graph is None:
-            full_graph = self.ds.build_feat_graph(include_mask=True)
-        edge_mask = full_graph[-1, :, :] if do_inpaint_sampling else None
-        full_graph = full_graph[:-1, :, :].unsqueeze(dim=0).to(self.device)
-        sampled_graph = self.ema.ema_model.sample_full(full_graph, batch_size, edge_mask, subgraph_size)
-        np.save(
-            str(self.results_folder / f"full-graph-sample-{milestone}.npy"),
-            sampled_graph[0, 0, :, :].cpu().detach().numpy()
-        )
+
+        rating_data = rating_data.to(self.device)
+        inpainting_data = (rating_data.ratings, rating_data.known_mask) if do_inpainting_sampling else None
+        rating_data.ratings = torch.randn_like(rating_data.ratings) / 3  # make it roughly -1 to 1
+        rating_data.known_mask = None
+
+        if tiled_sampling:
+            sampled_graph = self.model.sample_tiled(
+                rating_data=rating_data,
+                subgraph_size=subgraph_size,
+                max_batch_size=batch_size,
+                inpainting_data=inpainting_data,
+                silence_inner_tqdm=silence_inner_tqdm,
+            )
+        else:
+            sampled_graph = self.model.sample(
+                rating_data=rating_data,
+                inpainting_data=inpainting_data,
+                silence_inner_tqdm=silence_inner_tqdm,
+            )
+
+        sampled_graph = sampled_graph.detach().cpu()
+        np.save(str(self.results_folder / f"eval-sample-{milestone}.npy"), sampled_graph.numpy())
         return sampled_graph

@@ -1,2 +1,2 @@
-from .evaluate import get_metrics as compute_metrics
+from .evaluate import compute_metrics
 from .train import Trainer

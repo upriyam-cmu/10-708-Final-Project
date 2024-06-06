@@ -1,14 +1,13 @@
-from .embed import FeatureEmbedder, MovieLensFeatureEmbedder
-from .embed import SinusoidalPositionalEmbedding, RandomOrLearnedSinusoidalPositionalEmbedding
+from .embed import FeatureEmbedder, MovieLensFeatureEmbedder, SinusoidalPositionalEmbedding
 from .graph_transformer import GraphTransformer
 
 from ..datasets import RatingSubgraphData
+from ..diffusion import RatingDenoisingModel
 
-from einops import repeat
 from torch import nn
 
 
-class GraphReconstructionModel(nn.Module):
+class GraphReconstructionModel(nn.Module, RatingDenoisingModel):
     def __init__(self, feature_embedding: FeatureEmbedder, subgraph_model: nn.Module, feature_dim_size: int = None):
         super().__init__()
         self.embedding = feature_embedding
@@ -43,11 +42,15 @@ class GraphReconstructionModel(nn.Module):
             )
 
         if len(noise_map.shape) == 3:
+            added_batch_dim = True
+
             noise_map = noise_map.unsqueeze(dim=0)
             if known_mask is not None:
                 known_mask = known_mask.unsqueeze(dim=0)
             user_features = user_features.unsqueeze(dim=0)
             product_features = product_features.unsqueeze(dim=0)
+        else:
+            added_batch_dim = False
 
         # compute model results
         out = self.core_model(
@@ -58,6 +61,10 @@ class GraphReconstructionModel(nn.Module):
             known_mask=known_mask,
         )
 
+        # maybe drop batch dim & return prediction
+        if added_batch_dim:
+            assert out.shape[0] == 1
+            out = out.squeeze(dim=0)
         return out
 
     @staticmethod

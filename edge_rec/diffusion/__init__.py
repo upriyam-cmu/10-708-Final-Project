@@ -1,1 +1,1 @@
-from .diffusion import GaussianDiffusion
+from .diffusion import GaussianDiffusion, RatingDenoisingModel

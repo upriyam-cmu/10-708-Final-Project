@@ -1,9 +1,12 @@
 from ..datasets import RatingSubgraphData
 
+from abc import ABC, abstractmethod
 from collections import namedtuple
 from functools import partial
 from itertools import product
 import math
+from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Union
+import warnings
 
 from einops import rearrange, reduce
 import numpy as np
@@ -11,48 +14,129 @@ import torch
 from torch import nn
 from torch.cuda.amp import autocast
 from torch.nn import functional as F
-from tqdm.asyncio import tqdm
+
+with warnings.catch_warnings():
+    from tqdm.std import TqdmExperimentalWarning
+
+    warnings.simplefilter("ignore", category=TqdmExperimentalWarning)
+    from tqdm.autonotebook import tqdm
+
+
+class RatingDenoisingModel(ABC):
+    @abstractmethod
+    def __call__(self, rating_data: RatingSubgraphData, time_steps: torch.Tensor) -> torch.Tensor:
+        pass
+
 
 ModelPrediction = namedtuple('ModelPrediction', ['pred_noise', 'pred_x_start'])
 
 
-def extract(a, t, x_shape):
+def extract(a: torch.Tensor, t: torch.Tensor, x_shape: torch.Size):
     b, *_ = t.shape
     out = a.gather(-1, t)
     return out.reshape(b, *((1,) * (len(x_shape) - 1)))
 
 
-def linear_beta_schedule(timesteps):
+def _iter_time_steps(length: int, name: str, no_tqdm: bool = False):
+    return tqdm(reversed(range(length)), desc=name, total=length, disable=no_tqdm)
+
+
+__SubsampleIndexType = List[Tuple[np.ndarray, np.ndarray]]
+__IndexLoaderType = Generator[__SubsampleIndexType, Any, None]
+
+
+def _subsample_graph(
+        data_shape: torch.Size,
+        sample_tiled: bool = False,
+        subgraph_size: Optional[Union[int, Tuple[int, int]]] = None,
+        max_batch_size: Optional[int] = None,
+) -> Tuple[Callable[[], __IndexLoaderType], int]:
+    if not sample_tiled:
+        h, w = data_shape[-2:]
+        user_indices, product_indices = np.arange(h), np.arange(w)
+
+        n_groups = 1
+
+        def _get_indices():
+            yield [(user_indices, product_indices)]
+    else:
+        batch_dim = np.prod(data_shape[:-3], dtype=int)
+        if batch_dim != 1:
+            raise ValueError(f"Cannot sample full graph if batch dimension > 1. Got {batch_dim}.")
+        h, w = data_shape[-2:]
+
+        if subgraph_size is None:
+            raise ValueError("Must specify subgraph size to sample at for full graph generation.")
+        if max_batch_size is None:
+            raise ValueError("Must specify maximum batch size for sampling for full graph generation.")
+
+        if isinstance(subgraph_size, int):
+            n, m = subgraph_size, subgraph_size
+        elif isinstance(subgraph_size, tuple):
+            n, m = subgraph_size
+        else:
+            raise ValueError(f"subgraph_size must be an int or a tuple of 2 ints. Got {subgraph_size}.")
+
+        def _get_block_indices(dim_size, block_size):
+            assert dim_size >= block_size
+            indices = np.empty(((dim_size - 1) // block_size + 1) * block_size, dtype=int)
+            indices[:dim_size] = np.random.permutation(dim_size)
+            indices[dim_size:] = indices[:-dim_size]
+            return np.split(indices, range(block_size, dim_size, block_size))
+
+        h_blocks, w_blocks = _get_block_indices(h, n), _get_block_indices(w, m)
+        n_groups = (len(h_blocks) * len(w_blocks) - 1) // max_batch_size + 1
+
+        def _get_indices():
+            index_iterator = iter(product(h_blocks, w_blocks))
+            while True:
+                sample_indices: __SubsampleIndexType = []
+                try:
+                    for _ in range(max_batch_size):
+                        sample_indices.append(next(index_iterator))
+                except StopIteration:
+                    pass
+
+                if len(sample_indices) > 0:
+                    yield sample_indices
+                if len(sample_indices) < max_batch_size:
+                    # end of samples
+                    break
+
+    return _get_indices, n_groups
+
+
+def linear_beta_schedule(time_steps: int):
     """
     linear schedule, proposed in original ddpm paper
     """
-    scale = 1000 / timesteps
+    scale = 1000 / time_steps
     beta_start = scale * 0.0001
     beta_end = scale * 0.02
-    return torch.linspace(beta_start, beta_end, timesteps, dtype=torch.float64)
+    return torch.linspace(beta_start, beta_end, time_steps, dtype=torch.float64)
 
 
-def cosine_beta_schedule(timesteps, s=0.008):
+def cosine_beta_schedule(time_steps: int, s: float = 0.008):
     """
     cosine schedule
     as proposed in https://openreview.net/forum?id=-NEXDKk8gZ
     """
-    steps = timesteps + 1
-    t = torch.linspace(0, timesteps, steps, dtype=torch.float64) / timesteps
+    steps = time_steps + 1
+    t = torch.linspace(0, time_steps, steps, dtype=torch.float64) / time_steps
     alphas_cumprod = torch.cos((t + s) / (1 + s) * math.pi * 0.5) ** 2
     alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
     betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
     return torch.clip(betas, 0, 0.999)
 
 
-def sigmoid_beta_schedule(timesteps, start=-3, end=3, tau=1, clamp_min=1e-5):
+def sigmoid_beta_schedule(time_steps: int, start: float = -3, end: float = 3, tau: float = 1, clamp_min: float = 1e-5):
     """
     sigmoid schedule
     proposed in https://arxiv.org/abs/2212.11972 - Figure 8
     better for images > 64x64, when used during training
     """
-    steps = timesteps + 1
-    t = torch.linspace(0, timesteps, steps, dtype=torch.float64) / timesteps
+    steps = time_steps + 1
+    t = torch.linspace(0, time_steps, steps, dtype=torch.float64) / time_steps
     v_start = torch.tensor(start / tau).sigmoid()
     v_end = torch.tensor(end / tau).sigmoid()
     alphas_cumprod = (-((t * (end - start) + start) / tau).sigmoid() + v_end) / (v_end - v_start)
@@ -64,21 +148,21 @@ def sigmoid_beta_schedule(timesteps, start=-3, end=3, tau=1, clamp_min=1e-5):
 class GaussianDiffusion(nn.Module):
     def __init__(
             self,
-            model,
+            model: RatingDenoisingModel,
             *,
-            image_size,
-            timesteps=1000,
-            sampling_timesteps=None,
-            objective='pred_noise',
-            beta_schedule='cosine',
-            schedule_fn_kwargs=None,
-            ddim_sampling_eta=0.,
-            offset_noise_strength=0.,  # https://www.crosslabs.org/blog/diffusion-with-offset-noise
-            min_snr_loss_weight=False,  # https://arxiv.org/abs/2303.09556
-            min_snr_gamma=5,
+            image_size: Union[int, Tuple[int, int]],
+            time_steps: int = 1000,
+            sampling_time_steps: Optional[int] = None,
+            objective: str = 'pred_noise',
+            beta_schedule: str = 'cosine',
+            schedule_fn_kwargs: Optional[Dict[str, Union[float, int]]] = None,
+            ddim_sampling_eta: float = 0.,
+            offset_noise_strength: float = 0.,  # https://www.crosslabs.org/blog/diffusion-with-offset-noise
+            min_snr_loss_weight: bool = False,  # https://arxiv.org/abs/2303.09556
+            min_snr_gamma: float = 5,
     ):
         super().__init__()
-        assert not hasattr(model, 'random_or_learned_sinusoidal_cond') or not model.random_or_learned_sinusoidal_cond
+        # assert not hasattr(model, 'random_or_learned_sinusoidal_cond') or not model.random_or_learned_sinusoidal_cond
 
         self.model = model
         self.self_condition = None
@@ -107,22 +191,22 @@ class GaussianDiffusion(nn.Module):
         else:
             raise ValueError(f'unknown beta schedule {beta_schedule}')
 
-        betas = beta_schedule_fn(timesteps, **(schedule_fn_kwargs or {}))
+        betas = beta_schedule_fn(time_steps, **(schedule_fn_kwargs or {}))
 
         alphas = 1. - betas
         alphas_cumprod = torch.cumprod(alphas, dim=0)
         alphas_cumprod_prev = F.pad(alphas_cumprod[:-1], (1, 0), value=1.)
 
-        timesteps, = betas.shape
-        self.num_timesteps = int(timesteps)
+        time_steps, = betas.shape
+        self.num_time_steps = int(time_steps)
 
         # sampling related parameters
 
-        # default num sampling timesteps to number of timesteps at training
-        self.sampling_timesteps = sampling_timesteps if sampling_timesteps is not None else timesteps
+        # default num sampling time_steps to number of time_steps at training
+        self.sampling_time_steps = sampling_time_steps if sampling_time_steps is not None else time_steps
 
-        assert self.sampling_timesteps <= timesteps
-        self.is_ddim_sampling = self.sampling_timesteps < timesteps
+        assert self.sampling_time_steps <= time_steps
+        self.is_ddim_sampling = self.sampling_time_steps < time_steps
         self.ddim_sampling_eta = ddim_sampling_eta
 
         # helper function to register buffer from float64 to float32
@@ -178,36 +262,39 @@ class GaussianDiffusion(nn.Module):
             register_buffer('loss_weight', maybe_clipped_snr / (snr + 1))
 
     @property
-    def device(self):
+    def device(self) -> torch.device:
         return self.betas.device
 
-    def predict_start_from_noise(self, x_t, t, noise):
-        if isinstance(noise, torch.Tensor):
-            noise[:, 1:, :, :] = 0
+    def predict_start_from_noise(self, x_t: torch.Tensor, t: torch.Tensor, noise: torch.Tensor) -> torch.Tensor:
         return (
                 extract(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t -
                 extract(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape) * noise
         )
 
-    def predict_noise_from_start(self, x_t, t, x0):
+    def predict_noise_from_start(self, x_t: torch.Tensor, t: torch.Tensor, x0: torch.Tensor) -> torch.Tensor:
         return (
                 (extract(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t - x0) /
                 extract(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape)
         )
 
-    def predict_v(self, x_start, t, noise):
+    def predict_v(self, x_start: torch.Tensor, t: torch.Tensor, noise: torch.Tensor) -> torch.Tensor:
         return (
                 extract(self.sqrt_alphas_cumprod, t, x_start.shape) * noise -
                 extract(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * x_start
         )
 
-    def predict_start_from_v(self, x_t, t, v):
+    def predict_start_from_v(self, x_t: torch.Tensor, t: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         return (
                 extract(self.sqrt_alphas_cumprod, t, x_t.shape) * x_t -
                 extract(self.sqrt_one_minus_alphas_cumprod, t, x_t.shape) * v
         )
 
-    def q_posterior(self, x_start, x_t, t):
+    def q_posterior(
+            self,
+            x_start: torch.Tensor,
+            x_t: torch.Tensor,
+            t: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         posterior_mean = (
                 extract(self.posterior_mean_coef1, t, x_t.shape) * x_start +
                 extract(self.posterior_mean_coef2, t, x_t.shape) * x_t
@@ -216,11 +303,15 @@ class GaussianDiffusion(nn.Module):
         posterior_log_variance_clipped = extract(self.posterior_log_variance_clipped, t, x_t.shape)
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
-    def model_predictions(self, x, t, clip_x_start=False, rederive_pred_noise=False):
-        model_output = self.model(x, t)
-        zeros = torch.zeros_like(x, device=model_output.device)
-        zeros[:, 0, :, :] = model_output
-        model_output = zeros
+    def model_predictions(
+            self,
+            rating_data: RatingSubgraphData,
+            time_steps: torch.Tensor,
+            clip_x_start: bool = False,
+            recompute_pred_noise: bool = False,
+    ) -> ModelPrediction:
+        x, t = rating_data.ratings, time_steps
+        model_output = self.model(rating_data, time_steps)
         maybe_clip = partial(torch.clamp, min=-1., max=1.) if clip_x_start else (lambda _x, *args, **kwargs: _x)
 
         if self.objective == 'pred_noise':
@@ -228,7 +319,7 @@ class GaussianDiffusion(nn.Module):
             x_start = self.predict_start_from_noise(x, t, pred_noise)
             x_start = maybe_clip(x_start)
 
-            if clip_x_start and rederive_pred_noise:
+            if clip_x_start and recompute_pred_noise:
                 pred_noise = self.predict_noise_from_start(x, t, x_start)
 
         elif self.objective == 'pred_x0':
@@ -247,125 +338,119 @@ class GaussianDiffusion(nn.Module):
 
         return ModelPrediction(pred_noise, x_start)
 
-    def p_mean_variance(self, x, t, x_self_cond=None, clip_denoised=True):
-        preds = self.model_predictions(x, t, x_self_cond)
+    def p_mean_variance(
+            self,
+            rating_data: RatingSubgraphData,
+            time_steps: torch.Tensor,
+            clip_denoised: bool = True,
+    ):
+        x, t = rating_data.ratings, time_steps
+        preds = self.model_predictions(
+            rating_data=rating_data,
+            time_steps=time_steps,
+            clip_x_start=clip_denoised,
+        )
         x_start = preds.pred_x_start
-
-        if clip_denoised:
-            x_start.clamp_(-1., 1.)
 
         model_mean, posterior_variance, posterior_log_variance = self.q_posterior(x_start=x_start, x_t=x, t=t)
         return model_mean, posterior_variance, posterior_log_variance, x_start
 
     @torch.inference_mode()
-    def p_sample(self, x, x_0, t: int, self_cond=None, inpaint_mask=None):
+    def p_sample(
+            self,
+            rating_data: RatingSubgraphData,
+            time_step: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        x = rating_data.ratings
         b, *_, device = *x.shape, self.device
-        batched_times = torch.full((b,), t, device=device, dtype=torch.long)
+        time_steps = torch.full((b,), time_step, device=device, dtype=torch.long)
+
         model_mean, _, model_log_variance, x_start = self.p_mean_variance(
-            x=x,
-            t=batched_times,
-            x_self_cond=self_cond,
-            clip_denoised=True
+            rating_data=rating_data,
+            time_steps=time_steps,
+            clip_denoised=True,
         )
-        noise = torch.randn_like(x) if t > 0 else 0.  # no noise if t == 0
-        if isinstance(noise, torch.Tensor):
-            noise[:, 1:, :, :] = 0
+
+        noise = torch.randn_like(x) if time_step > 0 else 0.  # no noise if t == 0
         pred_img = model_mean + (0.5 * model_log_variance).exp() * noise
-        if inpaint_mask is not None:
-            x_t = self.q_sample(x_0, t)
-            pred_img[inpaint_mask] = x_t[inpaint_mask]
+
         return pred_img, x_start
 
-    def _subsample_img(self, img, sample_full_params):
-        if sample_full_params is None:
-            n_groups = 1
+    @torch.inference_mode()
+    def p_sample_loop(
+            self,
+            rating_data: RatingSubgraphData,
+            tiled_sampling_kwargs: Dict = None,
+            inpainting_data: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+            silence_inner_tqdm: bool = False,
+    ) -> torch.Tensor:
+        rating_data, orig_batch_specs = rating_data.with_batching()
+        b, device = rating_data.ratings.shape[0], self.device
 
-            def _subsample():
-                yield img, None
-        else:
-            b, f, h, w = img.shape
-            assert b == 1
-            max_batch_size, *all_subgraph_sizes = sample_full_params
+        for t in _iter_time_steps(length=self.num_time_steps, name='sampling loop time step'):
+            index_loader, n_samples = _subsample_graph(
+                **(tiled_sampling_kwargs or {}),
+                data_shape=rating_data.ratings.shape,
+                sample_tiled=(tiled_sampling_kwargs is not None),
+            )
+            for indices_list in tqdm(
+                    index_loader(),
+                    desc='subsampling loop',
+                    total=n_samples,
+                    disable=(silence_inner_tqdm or tiled_sampling_kwargs is None),
+            ):
+                data_slices = [
+                    rating_data.slice(user_indices, product_indices)
+                    for user_indices, product_indices in indices_list
+                ]
+                new_patches, _ = self.p_sample(rating_data=RatingSubgraphData.stack(data_slices), time_step=t)
 
-            def _get_block_inds(dim_size, block_size):
-                assert dim_size >= block_size
-                inds = np.empty(((dim_size - 1) // block_size + 1) * block_size, dtype=int)
-                inds[:dim_size] = np.random.permutation(dim_size)
-                inds[dim_size:] = inds[:len(inds) - dim_size]
-                return np.split(inds, range(block_size, dim_size, block_size))
+                assert len(new_patches) == len(indices_list)
+                for i, (h_indices, w_indices) in enumerate(indices_list):
+                    h_indices, w_indices = np.meshgrid(h_indices, w_indices, indexing='ij')
+                    rating_data.ratings[..., :, h_indices, w_indices] = new_patches[i, :, :, :]
 
-            n_groups = 0
-            iters = []
+            if inpainting_data is not None:
+                x_0, inpainting_mask = inpainting_data
+                x_t = self.q_sample(
+                    x_start=x_0,
+                    time_steps=torch.full((b,), t, device=device, dtype=torch.long),
+                )
+                rating_data.ratings[inpainting_mask] = x_t[inpainting_mask]
 
-            for subgraph_sizes in all_subgraph_sizes:
-                n, m = (subgraph_sizes, subgraph_sizes) if isinstance(subgraph_sizes, int) else subgraph_sizes
-
-                h_blocks, w_blocks = _get_block_inds(h, n), _get_block_inds(w, m)
-                n_groups += (len(h_blocks) * len(w_blocks) - 1) // max_batch_size + 1
-                iters.append(iter(product(h_blocks, w_blocks)))
-
-            def _subsample():
-                for split_iter in iters:
-                    while True:
-                        sample_inds = []
-                        try:
-                            for _ in range(max_batch_size):
-                                sample_inds.append(next(split_iter))
-                        except StopIteration:
-                            pass
-                        if len(sample_inds) > 0:
-                            sample_inds = [np.meshgrid(*inds, indexing='ij') for inds in sample_inds]
-                            data = torch.empty(len(sample_inds), f, n, m, dtype=img.dtype, device=img.device)
-                            for i, (h_inds, w_inds) in enumerate(sample_inds):
-                                data[i, :, :, :] = img[0, :, h_inds, w_inds]
-                            yield data, sample_inds
-                        if len(sample_inds) < max_batch_size:
-                            # end of samples
-                            break
-        return _subsample, n_groups
+        rating_data, _ = rating_data.with_batching(batch_specs=orig_batch_specs)
+        return rating_data.ratings
 
     @torch.inference_mode()
-    def p_sample_loop(self, x_start, return_all_timesteps=False, sample_full_params=None, inpaint_mask=None):
-        x_0 = x_start.clone()
-        img = x_start
-        imgs = [img]
+    def ddim_sample(
+            self,
+            rating_data: RatingSubgraphData,
+            tiled_sampling_kwargs: Dict = None,
+            inpainting_data: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+            silence_inner_tqdm: bool = False,
+    ) -> torch.Tensor:
+        rating_data, orig_batch_specs = rating_data.with_batching()
+        x_start = rating_data.ratings.clone()
 
-        tqdm2 = (lambda x, *y, **z: x)  # if sample_full_params is None else tqdm
-        for t in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step', total=self.num_timesteps):
-            subsampler, n_subsamples = self._subsample_img(img, sample_full_params)
-            for sub_img, ind_map in tqdm2(subsampler(), desc='subsampling loop', total=n_subsamples):
-                new_img, _ = self.p_sample(sub_img, x_0, t, self_cond=None, inpaint_mask=inpaint_mask)
-                if ind_map is None:
-                    new_img[:, 1:, :, :] = sub_img[:, 1:, :, :]
-                    img = new_img
-                else:
-                    assert len(new_img) == len(ind_map)
-                    assert img.shape[0] == 1
-                    for i, (h_inds, w_inds) in enumerate(ind_map):
-                        img[0, 0, h_inds, w_inds] = new_img[i, 0, :, :]
-            imgs.append(img)
+        batch, device, total_time_steps, sampling_time_steps, eta, objective = (
+            x_start.shape[0],
+            self.device,
+            self.num_time_steps,
+            self.sampling_time_steps,
+            self.ddim_sampling_eta,
+            self.objective,
+        )
 
-        return img if not return_all_timesteps else torch.stack(imgs, dim=1)
-
-    @torch.inference_mode()
-    def ddim_sample(self, x_start, return_all_timesteps=False, sample_full_params=None, inpaint_mask=None):
-        batch, device, total_timesteps, sampling_timesteps, eta, objective = x_start.shape[
-            0], self.device, self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective
-
-        times = torch.linspace(-1, total_timesteps - 1,
-                               steps=sampling_timesteps + 1)  # [-1, 0, 1, 2, ..., T-1] when sampling_timesteps == total_timesteps
+        # [-1, 0, 1, 2, ..., T-1] when sampling_time_steps == total_time_steps
+        times = torch.linspace(-1, total_time_steps - 1, steps=sampling_time_steps + 1)
         times = list(reversed(times.int().tolist()))
         time_pairs = list(zip(times[:-1], times[1:]))  # [(T-1, T-2), (T-2, T-3), ..., (1, 0), (0, -1)]
 
         img = x_start
-        imgs = [img]
 
-        tqdm2 = (lambda x, *y, **z: x)  # if sample_full_params is None else tqdm
-        for time, time_next in tqdm(time_pairs, desc='sampling loop time step'):
+        for time, time_next in tqdm(time_pairs[:-1], desc='sampling loop time step'):
             if time_next < 0:
-                img = x_start
-                imgs.append(img)
-                continue
+                assert False, f"unreachable: {time_pairs[:-1]} + {time_pairs[-1:]}"
 
             time_cond = torch.full((batch,), time, device=device, dtype=torch.long)
             alpha = self.alphas_cumprod[time]
@@ -374,63 +459,90 @@ class GaussianDiffusion(nn.Module):
             c = (1 - alpha_next - sigma ** 2).sqrt()
             scaled_x_start = x_start * alpha_next.sqrt()
 
-            subsampler, n_subsamples = self._subsample_img(img, sample_full_params)
-            for sub_img, ind_map in tqdm2(subsampler(), desc='subsampling loop', total=n_subsamples):
-                pred_noise, _, *_ = self.model_predictions(
-                    sub_img, time_cond,
-                    clip_x_start=True, rederive_pred_noise=True
+            index_loader, n_samples = _subsample_graph(
+                **(tiled_sampling_kwargs or {}),
+                data_shape=rating_data.ratings.shape,
+                sample_tiled=(tiled_sampling_kwargs is not None),
+            )
+            for indices_list in tqdm(
+                    index_loader(),
+                    desc='subsampling loop',
+                    total=n_samples,
+                    disable=(silence_inner_tqdm or tiled_sampling_kwargs is None),
+            ):
+                data_slices = [
+                    rating_data.slice(user_indices, product_indices)
+                    for user_indices, product_indices in indices_list
+                ]
+                pred_noise = self.model_predictions(
+                    rating_data=RatingSubgraphData.stack(data_slices),
+                    time_steps=time_cond,
+                    clip_x_start=True,
+                    recompute_pred_noise=True,
+                ).pred_noise
+
+                all_noise = c * pred_noise + sigma * torch.randn_like(pred_noise)
+                assert len(all_noise) == len(indices_list)
+                for i, (h_indices, w_indices) in enumerate(indices_list):
+                    h_indices, w_indices = np.meshgrid(h_indices, w_indices, indexing='ij')
+                    rating_data.ratings[..., :, h_indices, w_indices] = (
+                            all_noise[i, :, :, :] + scaled_x_start[..., :, h_indices, w_indices]
+                    )
+
+            if inpainting_data is not None:
+                x_0, inpainting_mask = inpainting_data
+                x_t = self.q_sample(
+                    x_start=x_0,
+                    time_steps=torch.full((batch,), time, device=device, dtype=torch.long),
                 )
-
-                all_noise = c * pred_noise + sigma * torch.randn_like(sub_img)
-                if ind_map is None:
-                    new_img = all_noise + scaled_x_start
-                    new_img[:, 1:, :, :] = sub_img[:, 1:, :, :]
-                    img = new_img
-                else:
-                    assert len(all_noise) == len(ind_map)
-                    assert img.shape[0] == 1
-                    for i, (h_inds, w_inds) in enumerate(ind_map):
-                        img[0, 0, h_inds, w_inds] = all_noise[i, 0, :, :] + scaled_x_start[0, 0, h_inds, w_inds]
-            imgs.append(img)
-
-        return img if not return_all_timesteps else torch.stack(imgs, dim=1)
-
-    @torch.inference_mode()
-    def sample(self, x_start, return_all_timesteps=False, sample_full_params=None, inpaint_mask=None):
-        sample_fn = self.p_sample_loop if not self.is_ddim_sampling else self.ddim_sample
-        assert not return_all_timesteps or sample_full_params is None
-        return sample_fn(x_start, return_all_timesteps=return_all_timesteps, sample_full_params=sample_full_params,
-                         inpaint_mask=inpaint_mask)
-
-    @torch.inference_mode()
-    def sample_full(self, x_start, max_batch_size, inpaint_mask, *subgraph_sizes):
-        if len(x_start.shape) == 3:
-            x_start = x_start.unsqueeze(dim=0)
-        return self.sample(x_start, return_all_timesteps=False, sample_full_params=(max_batch_size, *subgraph_sizes),
-                           inpaint_mask=inpaint_mask)
-
-    @torch.inference_mode()
-    def interpolate(self, x1, x2, t=None, lam=0.5):
-        b, *_, device = *x1.shape, x1.device
-        t = t if t is not None else (self.num_timesteps - 1)
-
-        assert x1.shape == x2.shape
-
-        t_batched = torch.full((b,), t, device=device)
-        xt1, xt2 = map(lambda x: self.q_sample(x, t=t_batched), (x1, x2))
-
-        img = (1 - lam) * xt1 + lam * xt2
-
-        x_start = None
-
-        for i in tqdm(reversed(range(0, t)), desc='interpolation sample time step', total=t):
-            self_cond = x_start if self.self_condition else None
-            img, x_start = self.p_sample(img, i, self_cond)
+                rating_data.ratings[inpainting_mask] = x_t[inpainting_mask]
 
         return img
 
+    @torch.inference_mode()
+    def sample(
+            self,
+            rating_data: RatingSubgraphData,
+            tiled_sampling_kwargs: Dict = None,
+            inpainting_data: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+            silence_inner_tqdm: bool = False,
+    ) -> torch.Tensor:
+        sample_fn = self.p_sample_loop if not self.is_ddim_sampling else self.ddim_sample
+        return sample_fn(
+            rating_data=rating_data,
+            tiled_sampling_kwargs=tiled_sampling_kwargs,
+            inpainting_data=inpainting_data,
+            silence_inner_tqdm=silence_inner_tqdm,
+        )
+
+    @torch.inference_mode()
+    def sample_tiled(
+            self,
+            rating_data: RatingSubgraphData,
+            subgraph_size: Union[int, Tuple[int, int]],
+            max_batch_size: int,
+            inpainting_data: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+            silence_inner_tqdm: bool = False,
+    ) -> torch.Tensor:
+        return self.sample(
+            rating_data=rating_data,
+            tiled_sampling_kwargs=dict(
+                subgraph_size=subgraph_size,
+                max_batch_size=max_batch_size,
+            ),
+            inpainting_data=inpainting_data,
+            silence_inner_tqdm=silence_inner_tqdm,
+        )
+
     @autocast(enabled=False)
-    def q_sample(self, x_start, t, noise=None):
+    def q_sample(
+            self,
+            x_start: torch.Tensor,
+            time_steps: torch.Tensor,
+            noise: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        t = time_steps
+
         if noise is None:
             noise = torch.randn_like(x_start)
 
@@ -439,7 +551,13 @@ class GaussianDiffusion(nn.Module):
                 extract(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise
         )
 
-    def p_losses(self, rating_data: RatingSubgraphData, time_steps, noise=None, offset_noise_strength=None):
+    def p_losses(
+            self,
+            rating_data: RatingSubgraphData,
+            time_steps: torch.Tensor,
+            noise: Optional[torch.Tensor] = None,
+            offset_noise_strength: Optional[float] = None,
+    ) -> torch.Tensor:
         x_start, t, known_mask = rating_data.ratings, time_steps, rating_data.known_mask
         b, c, h, w = x_start.shape
 
@@ -456,7 +574,7 @@ class GaussianDiffusion(nn.Module):
             noise += offset_noise_strength * rearrange(offset_noise, 'b c -> b c 1 1')
 
         # noise sample
-        x = self.q_sample(x_start=x_start, t=t, noise=noise)
+        x = self.q_sample(x_start=x_start, time_steps=t, noise=noise)
 
         # if doing self-conditioning, 50% of the time, predict x_start from current set of times
         # and condition with unet with that
@@ -493,7 +611,7 @@ class GaussianDiffusion(nn.Module):
         img_h, img_w = self.image_size
 
         assert h == img_h and w == img_w, f"Expected patch size {(img_h, img_w)}, got {(h, w)}."
-        time_steps = torch.randint(0, self.num_timesteps, (b,), device=device).long()
+        time_steps = torch.randint(0, self.num_time_steps, (b,), device=device).long()
 
         return self.p_losses(
             rating_data=rating_data,

@@ -5,7 +5,7 @@ from ..data_holder import DataHolder, RatingSubgraphData
 from ..transforms import Transform
 
 from functools import partial
-from typing import Dict
+from typing import Dict, Optional, Tuple, Union
 
 import numpy as np
 from pathlib import Path
@@ -49,16 +49,16 @@ class MovieLensDataHolder(DataHolder):
         self.top_users, self.top_movies = self._build_density_scores(self.train_edges, self.n_users, self.n_movies)
 
     @staticmethod
-    def _split_edges(edge_inds: torch.Tensor, edge_ratings: torch.Tensor, test_split: float):
+    def _split_edges(edge_indices: torch.Tensor, edge_ratings: torch.Tensor, test_split: float):
         n_edges = len(edge_ratings)
 
-        edge_inds, edge_ratings = edge_inds.numpy(), edge_ratings.numpy()
-        sort_inds = np.argsort(edge_inds[0])
-        edge_inds, edge_ratings = edge_inds[:, sort_inds], edge_ratings[sort_inds]
+        edge_indices, edge_ratings = edge_indices.numpy(), edge_ratings.numpy()
+        sort_indices = np.argsort(edge_indices[0])
+        edge_indices, edge_ratings = edge_indices[:, sort_indices], edge_ratings[sort_indices]
 
         train_group, test_group = [], []
-        _, split_inds = np.unique(edge_inds[0], return_index=True)
-        for edge_group in np.split(np.arange(n_edges), split_inds[1:]):
+        _, split_indices = np.unique(edge_indices[0], return_index=True)
+        for edge_group in np.split(np.arange(n_edges), split_indices[1:]):
             np.random.shuffle(edge_group)
             n_test = int(test_split * len(edge_group))
             train_group.append(edge_group[:-n_test])
@@ -67,9 +67,9 @@ class MovieLensDataHolder(DataHolder):
         train_group = np.concatenate(train_group)
         test_group = np.concatenate(test_group)
 
-        train_edges = edge_inds.T[train_group], edge_ratings[train_group]
-        test_edges = edge_inds.T[test_group], edge_ratings[test_group]
-        all_edges = edge_inds.T, edge_ratings
+        train_edges = edge_indices.T[train_group], edge_ratings[train_group]
+        test_edges = edge_indices.T[test_group], edge_ratings[test_group]
+        all_edges = edge_indices.T, edge_ratings
 
         return train_edges, test_edges, all_edges
 
@@ -136,22 +136,64 @@ class MovieLensDataHolder(DataHolder):
 
         return top_users, top_movies
 
+    def get_subgraph_indices(
+            self,
+            subgraph_size: Union[Optional[int], Tuple[Optional[int], Optional[int]]],
+            target_density: Optional[float],
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        if subgraph_size is None:
+            subgraph_size = (self.n_users, self.n_movies)
+        else:
+            sz1, sz2 = (subgraph_size, subgraph_size) if isinstance(subgraph_size, int) else subgraph_size
+            if sz1 is None:
+                sz1 = self.n_users
+            if sz2 is None:
+                sz2 = self.n_movies
+            subgraph_size = (sz1, sz2)
+        assert len(subgraph_size) == 2 and all(type(sz) == int for sz in subgraph_size), f"size={subgraph_size}"
+        n_users_sampled, n_movies_sampled = subgraph_size
+
+        if target_density is None:
+            user_indices = np.random.choice(self.n_users, n_users_sampled, replace=False)
+            movie_indices = np.random.choice(self.n_movies, n_movies_sampled, replace=False)
+        else:
+            slice_point = round((target_density ** (-1 / 2.25) - 1) * 500)
+            assert slice_point >= n_users_sampled and slice_point >= n_movies_sampled, \
+                "Desired density too high for desired subgraph size"
+
+            random_weights = ((np.arange(slice_point)[::-1] + 1) / 500 + 1) ** -2.25
+            random_weights = random_weights / random_weights.sum()
+            user_indices = np.random.choice(
+                self.top_users[:slice_point],
+                size=n_users_sampled,
+                replace=False,
+                p=random_weights,
+            )
+            movie_indices = np.random.choice(
+                self.top_movies[:slice_point],
+                size=n_movies_sampled,
+                replace=False,
+                p=random_weights,
+            )
+
+        return user_indices, movie_indices
+
     @staticmethod
-    def slice_edges(edges, user_inds, movie_inds) -> torch.Tensor:
-        n_users_sampled, n_movies_sampled = len(user_inds), len(movie_inds)
-        user_id_to_ind = {user_id: idx for idx, user_id in enumerate(user_inds)}
-        assert len(user_id_to_ind) == n_users_sampled
-        movie_id_to_ind = {movie_id: idx for idx, movie_id in enumerate(movie_inds)}
-        assert len(movie_id_to_ind) == n_movies_sampled
+    def slice_edges(edges, user_indices, movie_indices) -> torch.Tensor:
+        n_users_sampled, n_movies_sampled = len(user_indices), len(movie_indices)
+        user_id_to_idx = {user_id: idx for idx, user_id in enumerate(user_indices)}
+        assert len(user_id_to_idx) == n_users_sampled
+        movie_id_to_idx = {movie_id: idx for idx, movie_id in enumerate(movie_indices)}
+        assert len(movie_id_to_idx) == n_movies_sampled
 
         sliced = torch.zeros(n_users_sampled, n_movies_sampled)
         for (user_id, movie_id), rating in zip(*edges):
-            if user_id in user_id_to_ind and movie_id in movie_id_to_ind:
-                sliced[user_id_to_ind[user_id], movie_id_to_ind[movie_id]] = rating
+            if user_id in user_id_to_idx and movie_id in movie_id_to_idx:
+                sliced[user_id_to_idx[user_id], movie_id_to_idx[movie_id]] = rating
         return sliced
 
     @staticmethod
-    def get_ratings_and_mask(*all_edges, user_inds, movie_inds, ratings_transform: Transform = None):
+    def get_ratings_and_mask(*all_edges, user_indices, movie_indices, ratings_transform: Transform = None):
         if len(all_edges) == 0:
             # no edges to select
             return None, None
@@ -164,7 +206,7 @@ class MovieLensDataHolder(DataHolder):
         edges = np.concatenate(all_ids, axis=0), np.concatenate(all_ratings, axis=0)
 
         # get ratings
-        ratings = MovieLensDataHolder.slice_edges(edges, user_inds, movie_inds)  # shape = (n, m)
+        ratings = MovieLensDataHolder.slice_edges(edges, user_indices, movie_indices)  # shape = (n, m)
         mask = (ratings != 0)
 
         # transform ratings
@@ -183,49 +225,14 @@ class MovieLensDataHolder(DataHolder):
         else:
             return features[indices]
 
-    def get_subgraph(
+    def slice_subgraph(
             self,
-            subgraph_size,
-            target_density,
+            user_indices: np.ndarray,
+            product_indices: np.ndarray,
             *,
             return_train_edges: bool = True,
             return_test_edges: bool = True,
     ) -> RatingSubgraphData:
-        if subgraph_size is None:
-            subgraph_size = (self.n_users, self.n_movies)
-        else:
-            sz1, sz2 = (subgraph_size, subgraph_size) if isinstance(subgraph_size, int) else subgraph_size
-            if sz1 is None:
-                sz1 = self.n_users
-            if sz2 is None:
-                sz2 = self.n_movies
-            subgraph_size = (sz1, sz2)
-        assert len(subgraph_size) == 2 and all(type(sz) == int for sz in subgraph_size), f"size={subgraph_size}"
-        n_users_sampled, n_movies_sampled = subgraph_size
-
-        if target_density is None:
-            user_inds = np.random.choice(self.n_users, n_users_sampled, replace=False)
-            movie_inds = np.random.choice(self.n_movies, n_movies_sampled, replace=False)
-        else:
-            slice_point = round((target_density ** (-1 / 2.25) - 1) * 500)
-            assert slice_point >= n_users_sampled and slice_point >= n_movies_sampled, \
-                "Desired density too high for desired subgraph size"
-
-            random_weights = ((np.arange(slice_point)[::-1] + 1) / 500 + 1) ** -2.25
-            random_weights = random_weights / random_weights.sum()
-            user_inds = np.random.choice(
-                self.top_users[:slice_point],
-                size=n_users_sampled,
-                replace=False,
-                p=random_weights,
-            )
-            movie_inds = np.random.choice(
-                self.top_movies[:slice_point],
-                size=n_movies_sampled,
-                replace=False,
-                p=random_weights,
-            )
-
         edges_to_include = []
         if return_train_edges:
             edges_to_include.append(self.train_edges)
@@ -234,13 +241,13 @@ class MovieLensDataHolder(DataHolder):
 
         ratings, known_mask = self.get_ratings_and_mask(
             *edges_to_include,
-            user_inds=user_inds,
-            movie_inds=movie_inds,
+            user_indices=user_indices,
+            movie_indices=product_indices,
             ratings_transform=self.ratings_transform,
         )
 
-        user_features = self.slice_features(self.user_data, user_inds)
-        movie_features = self.slice_features(self.movie_data, movie_inds)
+        user_features = self.slice_features(self.user_data, user_indices)
+        movie_features = self.slice_features(self.movie_data, product_indices)
 
         return RatingSubgraphData(
             # edge data
