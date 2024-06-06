@@ -258,6 +258,8 @@ class Trainer(object):
         if milestone is not None:
             self.load(milestone)
 
+        rating_data, _ = rating_data.with_batching()
+
         rating_data = rating_data.to(self.device)
         inpainting_data = (rating_data.ratings, rating_data.known_mask) if do_inpainting_sampling else None
         rating_data.ratings = torch.randn_like(rating_data.ratings) / 3  # make it roughly -1 to 1
