@@ -318,9 +318,9 @@ class GaussianDiffusion(nn.Module):
             noise[:, 1:, :, :] = 0
         pred_img = model_mean + (0.5 * model_log_variance).exp() * noise
         if inpaint_mask is not None:
-            x_t = self.q_sample(x_0, t)
+            x_t = self.q_sample(x_0, batched_times)
             pred_img[inpaint_mask] = x_t[inpaint_mask]
-        return pred_img, x_start
+        return pred_img, x_start    
 
     def _subsample_img(self, img, sample_full_params):
         if sample_full_params is None:
