@@ -1,3 +1,5 @@
+from ...utils import Model, merge_dicts
+
 from typing import Callable, Dict, Optional, Tuple, Union
 
 import torch
@@ -18,13 +20,29 @@ class EmbedderConfigurationSchema:
         self.user_config = user_config
         self.product_config = product_config
 
+    @staticmethod
+    def _generate_output_size_dicts(config: EmbeddingConfig, prefix: Optional[str] = None) -> Dict[str, int]:
+        prefix = f"{prefix}_" if prefix is not None else ""
+        return {
+            f"{prefix}{feature_key}": output_dim_size
+            for feature_key, (_, output_dim_size) in config.items()
+        }
+
+    @property
+    def model_spec(self) -> dict:
+        return merge_dicts(
+            {},
+            self._generate_output_size_dicts(self.user_config, prefix="user"),
+            self._generate_output_size_dicts(self.product_config, prefix="product"),
+            error_message="EmbedderConfigurationSchema has shared features between user/product cfg",
+        )
+
     @property
     def output_sizes(self) -> Tuple[int, int]:
-        user_out_dim, product_out_dim = tuple(
-            sum(output_dim_size for _, output_dim_size in config.values())
-            for config in (self.user_config, self.product_config)
+        return (
+            sum(self._generate_output_size_dicts(self.user_config).values()),
+            sum(self._generate_output_size_dicts(self.product_config).values()),
         )
-        return user_out_dim, product_out_dim
 
     @property
     def modules(self) -> nn.Module:
@@ -111,9 +129,9 @@ class EmbedderConfigurationSchema:
         return (embedding_layer, embedding_layer), embedding_dim
 
 
-class FeatureEmbedder(nn.Module):
-    def __init__(self, config: EmbedderConfigurationSchema):
-        super().__init__()
+class FeatureEmbedder(Model):
+    def __init__(self, config: EmbedderConfigurationSchema, model_spec: Optional[dict] = None):
+        super().__init__(model_spec=(model_spec or config.model_spec))
         self.embedding_config = config
         self._cfg_modules = config.modules  # so that all modules are registered by pytorch
 

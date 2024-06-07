@@ -1,7 +1,9 @@
 from .attend import SelfAttention, Stacked1DSelfAttention as RCSSelfAttn, SeparableCrossAttention as RCSCrossAttn
 from .embed import TimeEmbedder
 
-from typing import Tuple, Union
+from ..utils import Model, get_kwargs
+
+from typing import Optional, Tuple, Union
 
 from einops import rearrange
 import torch
@@ -19,7 +21,7 @@ def build_feed_forward(in_dim, hidden_dims, out_dim, activation_fn):
     return nn.Sequential(*components[:-1])
 
 
-def get_kwargs(kwargs, **defaults):
+def update_default_kwargs(kwargs, **defaults):
     if kwargs is None:
         kwargs = {}
     return {**defaults, **kwargs}
@@ -104,19 +106,29 @@ class RatingDecoderBlock(nn.Module):
         return noise_map + orig_noise_map  # residual
 
 
-class GraphTransformer(nn.Module):
+class GraphTransformer(Model):
+    __DEFAULT_ATTN_KWARGS = dict(heads=4, dim_head=32, num_mem_kv=4, flash=False, share_weights=True)
+    __DEFAULT_FEED_FORWARD_KWARGS = dict(hidden_dims=(), activation_fn=None)
+
     def __init__(
             self,
             n_blocks: int,
             n_channels: int,
             n_features: Union[int, Tuple[int, int]],
             time_embedder: TimeEmbedder,
+            n_channels_internal: Optional[int] = None,
             attn_kwargs: dict = None,
             feed_forward_kwargs: dict = None,
     ):
-        super().__init__()
-        attn_kwargs = get_kwargs(attn_kwargs, heads=4, dim_head=32, num_mem_kv=4, flash=False, share_weights=True)
-        feed_forward_kwargs = get_kwargs(feed_forward_kwargs, hidden_dims=[], activation_fn=None)
+        super().__init__(model_spec=get_kwargs())
+        attn_kwargs = {
+            **self.__DEFAULT_ATTN_KWARGS,
+            **(attn_kwargs or {}),
+        }
+        feed_forward_kwargs = {
+            **self.__DEFAULT_FEED_FORWARD_KWARGS,
+            **(feed_forward_kwargs or {}),
+        }
 
         if isinstance(n_features, int):
             user_feature_dim_size = product_feature_dim_size = n_features
@@ -125,12 +137,16 @@ class GraphTransformer(nn.Module):
         else:
             raise ValueError(f"n_features must be an int or a tuple of 2 ints. Got {n_features}.")
 
+        n_channels_internal = n_channels_internal or n_channels
+
         self.time_embed_initial = nn.Sequential(
             time_embedder,
             nn.Linear(time_embedder.out_dim, 4 * n_channels),
             nn.SiLU(),
-            nn.Linear(4 * n_channels, 4 * n_channels)
+            nn.Linear(4 * n_channels, 4 * n_channels_internal)
         )
+
+        self.initial_linear = nn.Conv2d(n_channels, n_channels_internal, 1)
 
         self.encoder_blocks = nn.ModuleList()
         self.decoder_blocks = nn.ModuleList()
@@ -156,32 +172,32 @@ class GraphTransformer(nn.Module):
 
             decoder_modules["time_embed"] = nn.Sequential(
                 nn.SiLU(),
-                nn.Linear(4 * n_channels, 9 * n_channels)
+                nn.Linear(4 * n_channels_internal, 9 * n_channels_internal)
             )
 
             decoder_modules["self_attn_block"] = RatingDecoderBlock(
-                channel_dim_size=n_channels,
-                core_block=RCSSelfAttn(**attn_kwargs, dim=n_channels),
+                channel_dim_size=n_channels_internal,
+                core_block=RCSSelfAttn(**attn_kwargs, dim=n_channels_internal),
             )
             decoder_modules["cross_attn_block"] = RatingDecoderBlock(
-                channel_dim_size=n_channels,
+                channel_dim_size=n_channels_internal,
                 core_block=RCSCrossAttn(
                     **attn_kwargs,
                     d_row_ft=user_feature_dim_size,
                     d_col_ft=product_feature_dim_size,
-                    d_channel=n_channels,
+                    d_channel=n_channels_internal,
                 ),
             )
             decoder_modules["feed_forward_block"] = RatingDecoderBlock(
-                channel_dim_size=n_channels,
+                channel_dim_size=n_channels_internal,
                 core_block=build_feed_forward(
                     **feed_forward_kwargs,
-                    in_dim=n_channels,
-                    out_dim=n_channels
+                    in_dim=n_channels_internal,
+                    out_dim=n_channels_internal,
                 ),
             )
 
-        self.final_linear = nn.Conv2d(n_channels, n_channels, 1)
+        self.final_linear = nn.Conv2d(n_channels_internal, n_channels, 1)
 
     def forward(self, noise_map, user_features, product_features, time_steps, known_mask=None):
         """

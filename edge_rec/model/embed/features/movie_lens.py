@@ -1,5 +1,7 @@
 from ..feature_embed import EmbedderConfigurationSchema as ECS, FeatureEmbedder
 
+from ....utils import get_kwargs
+
 from typing import Optional, Tuple, Union
 
 
@@ -59,4 +61,7 @@ class MovieLensFeatureEmbedder(FeatureEmbedder):
         if movie_rating_counts_dims is not None:
             movie_config['rating_counts'] = _get_complex_embed(movie_rating_counts_dims, 'movie_rating_counts_dims')
 
-        super().__init__(config=ECS(user_config=user_config, product_config=movie_config))
+        super().__init__(
+            config=ECS(user_config=user_config, product_config=movie_config),
+            model_spec=get_kwargs(),
+        )

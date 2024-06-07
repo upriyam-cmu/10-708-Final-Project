@@ -1,34 +1,23 @@
 from ..datasets import RatingSubgraphData
+from ..utils import tqdm, Model, get_kwargs
 
-from abc import ABC, abstractmethod
-from collections import namedtuple
+from abc import ABC
 from functools import partial
 from itertools import product
 import math
 from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Union
-import warnings
 
 from einops import rearrange, reduce
 import numpy as np
 import torch
-from torch import nn
 from torch.cuda.amp import autocast
 from torch.nn import functional as F
 
-with warnings.catch_warnings():
-    from tqdm.std import TqdmExperimentalWarning
 
-    warnings.simplefilter("ignore", category=TqdmExperimentalWarning)
-    from tqdm.autonotebook import tqdm
-
-
-class RatingDenoisingModel(ABC):
-    @abstractmethod
+class RatingDenoisingModel(Model, ABC):
     def __call__(self, rating_data: RatingSubgraphData, time_steps: torch.Tensor) -> torch.Tensor:
-        pass
-
-
-ModelPrediction = namedtuple('ModelPrediction', ['pred_noise', 'pred_x_start'])
+        # add type annotations/specifications
+        return super().__call__(rating_data, time_steps)
 
 
 def extract(a: torch.Tensor, t: torch.Tensor, x_shape: torch.Size):
@@ -78,7 +67,7 @@ def _subsample_graph(
             raise ValueError(f"subgraph_size must be an int or a tuple of 2 ints. Got {subgraph_size}.")
 
         def _get_block_indices(dim_size, block_size):
-            assert dim_size >= block_size
+            assert dim_size >= block_size, f"Got (dim_size={dim_size}) < (block_size={block_size})"
             indices = np.empty(((dim_size - 1) // block_size + 1) * block_size, dtype=int)
             indices[:dim_size] = np.random.permutation(dim_size)
             indices[dim_size:] = indices[:-dim_size]
@@ -145,7 +134,7 @@ def sigmoid_beta_schedule(time_steps: int, start: float = -3, end: float = 3, ta
     return torch.clip(betas, 0, 0.999)
 
 
-class GaussianDiffusion(nn.Module):
+class GaussianDiffusion(Model):
     def __init__(
             self,
             model: RatingDenoisingModel,
@@ -161,16 +150,15 @@ class GaussianDiffusion(nn.Module):
             min_snr_loss_weight: bool = False,  # https://arxiv.org/abs/2303.09556
             min_snr_gamma: float = 5,
     ):
-        super().__init__()
-        # assert not hasattr(model, 'random_or_learned_sinusoidal_cond') or not model.random_or_learned_sinusoidal_cond
+        super().__init__(model_spec=get_kwargs())
 
         self.model = model
         self.self_condition = None
 
         if isinstance(image_size, int):
             image_size = (image_size, image_size)
-        assert isinstance(image_size, (tuple, list)) and len(
-            image_size) == 2, 'image size must be a integer or a tuple/list of two integers'
+        assert isinstance(image_size, (tuple, list)) and len(image_size) == 2, \
+            'image size must be a integer or a tuple/list of two integers'
         self.image_size = image_size
 
         self.objective = objective
@@ -205,7 +193,7 @@ class GaussianDiffusion(nn.Module):
         # default num sampling time_steps to number of time_steps at training
         self.sampling_time_steps = sampling_time_steps if sampling_time_steps is not None else time_steps
 
-        assert self.sampling_time_steps <= time_steps
+        assert self.sampling_time_steps <= time_steps, f"Got sampling_time_steps={self.sampling_time_steps}"
         self.is_ddim_sampling = self.sampling_time_steps < time_steps
         self.ddim_sampling_eta = ddim_sampling_eta
 
@@ -309,7 +297,7 @@ class GaussianDiffusion(nn.Module):
             time_steps: torch.Tensor,
             clip_x_start: bool = False,
             recompute_pred_noise: bool = False,
-    ) -> ModelPrediction:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         x, t = rating_data.ratings, time_steps
         model_output = self.model(rating_data, time_steps)
         maybe_clip = partial(torch.clamp, min=-1., max=1.) if clip_x_start else (lambda _x, *args, **kwargs: _x)
@@ -336,7 +324,7 @@ class GaussianDiffusion(nn.Module):
         else:
             assert False, f"unreachable: objective='{self.objective}'"
 
-        return ModelPrediction(pred_noise, x_start)
+        return pred_noise, x_start
 
     def p_mean_variance(
             self,
@@ -345,12 +333,11 @@ class GaussianDiffusion(nn.Module):
             clip_denoised: bool = True,
     ):
         x, t = rating_data.ratings, time_steps
-        preds = self.model_predictions(
+        _, x_start = self.model_predictions(
             rating_data=rating_data,
             time_steps=time_steps,
             clip_x_start=clip_denoised,
         )
-        x_start = preds.pred_x_start
 
         model_mean, posterior_variance, posterior_log_variance = self.q_posterior(x_start=x_start, x_t=x, t=t)
         return model_mean, posterior_variance, posterior_log_variance, x_start
@@ -385,12 +372,12 @@ class GaussianDiffusion(nn.Module):
             silence_inner_tqdm: bool = False,
     ) -> torch.Tensor:
         rating_data, orig_batch_specs = rating_data.with_batching()
-        b, device = rating_data.ratings.shape[0], self.device
+        b, device = rating_data.shape[0], self.device
 
         for t in _iter_time_steps(length=self.num_time_steps, name='sampling loop time step'):
             index_loader, n_samples = _subsample_graph(
                 **(tiled_sampling_kwargs or {}),
-                data_shape=rating_data.ratings.shape,
+                data_shape=rating_data.shape,
                 sample_tiled=(tiled_sampling_kwargs is not None),
             )
             for indices_list in tqdm(
@@ -403,12 +390,17 @@ class GaussianDiffusion(nn.Module):
                     rating_data.slice(user_indices, product_indices)
                     for user_indices, product_indices in indices_list
                 ]
-                new_patches, _ = self.p_sample(rating_data=RatingSubgraphData.stack(data_slices), time_step=t)
+                with RatingSubgraphData.stack(data_slices).batched() as batching_context:
+                    rating_data_slice, _, transformer_fn = batching_context
+                    new_patches, _ = self.p_sample(rating_data=rating_data_slice, time_step=t)
+                    if transformer_fn is not None:
+                        new_patches = transformer_fn(new_patches)
 
-                assert len(new_patches) == len(indices_list)
+                assert len(new_patches) == len(indices_list), \
+                    f"batch_size={b}, len(new_patches)={len(new_patches)}, len(indices_list)={len(indices_list)}"
                 for i, (h_indices, w_indices) in enumerate(indices_list):
                     h_indices, w_indices = np.meshgrid(h_indices, w_indices, indexing='ij')
-                    rating_data.ratings[..., :, h_indices, w_indices] = new_patches[i, :, :, :]
+                    rating_data.ratings[..., h_indices, w_indices] = new_patches[i]
 
             if inpainting_data is not None:
                 x_0, inpainting_mask = inpainting_data
@@ -446,8 +438,6 @@ class GaussianDiffusion(nn.Module):
         times = list(reversed(times.int().tolist()))
         time_pairs = list(zip(times[:-1], times[1:]))  # [(T-1, T-2), (T-2, T-3), ..., (1, 0), (0, -1)]
 
-        img = x_start
-
         for time, time_next in tqdm(time_pairs[:-1], desc='sampling loop time step'):
             if time_next < 0:
                 assert False, f"unreachable: {time_pairs[:-1]} + {time_pairs[-1:]}"
@@ -461,7 +451,7 @@ class GaussianDiffusion(nn.Module):
 
             index_loader, n_samples = _subsample_graph(
                 **(tiled_sampling_kwargs or {}),
-                data_shape=rating_data.ratings.shape,
+                data_shape=rating_data.shape,
                 sample_tiled=(tiled_sampling_kwargs is not None),
             )
             for indices_list in tqdm(
@@ -474,20 +464,25 @@ class GaussianDiffusion(nn.Module):
                     rating_data.slice(user_indices, product_indices)
                     for user_indices, product_indices in indices_list
                 ]
-                pred_noise = self.model_predictions(
-                    rating_data=RatingSubgraphData.stack(data_slices),
-                    time_steps=time_cond,
-                    clip_x_start=True,
-                    recompute_pred_noise=True,
-                ).pred_noise
+                with RatingSubgraphData.stack(data_slices).batched() as batching_context:
+                    rating_data_slice, _, transformer_fn = batching_context
+                    pred_noise, _ = self.model_predictions(
+                        rating_data=rating_data_slice,
+                        time_steps=time_cond,
+                        clip_x_start=True,
+                        recompute_pred_noise=True,
+                    )
+
+                    if transformer_fn is not None:
+                        pred_noise = transformer_fn(pred_noise)
 
                 all_noise = c * pred_noise + sigma * torch.randn_like(pred_noise)
-                assert len(all_noise) == len(indices_list)
+                assert len(all_noise) == len(indices_list), \
+                    f"batch_size={batch}, len(all_noise)={len(all_noise)}, len(indices_list)={len(indices_list)}"
                 for i, (h_indices, w_indices) in enumerate(indices_list):
                     h_indices, w_indices = np.meshgrid(h_indices, w_indices, indexing='ij')
-                    rating_data.ratings[..., :, h_indices, w_indices] = (
-                            all_noise[i, :, :, :] + scaled_x_start[..., :, h_indices, w_indices]
-                    )
+                    new_patch = all_noise[i] + scaled_x_start[..., h_indices, w_indices]
+                    rating_data.ratings[..., h_indices, w_indices] = new_patch
 
             if inpainting_data is not None:
                 x_0, inpainting_mask = inpainting_data
@@ -497,7 +492,8 @@ class GaussianDiffusion(nn.Module):
                 )
                 rating_data.ratings[inpainting_mask] = x_t[inpainting_mask]
 
-        return img
+        rating_data, _ = rating_data.with_batching(batch_specs=orig_batch_specs)
+        return rating_data.ratings
 
     @torch.inference_mode()
     def sample(
@@ -606,7 +602,7 @@ class GaussianDiffusion(nn.Module):
         return loss.mean()
 
     def forward(self, rating_data: RatingSubgraphData):
-        b, c, h, w = rating_data.ratings.shape
+        b, c, h, w = rating_data.shape
         device = rating_data.ratings.device
         img_h, img_w = self.image_size
 

@@ -3,23 +3,22 @@ from .graph_transformer import GraphTransformer
 
 from ..datasets import RatingSubgraphData
 from ..diffusion import RatingDenoisingModel
+from ..utils import Model, get_kwargs
 
 from torch import nn
 
 
-class GraphReconstructionModel(nn.Module, RatingDenoisingModel):
-    def __init__(self, feature_embedding: FeatureEmbedder, subgraph_model: nn.Module, feature_dim_size: int = None):
-        super().__init__()
+class GraphReconstructionModel(RatingDenoisingModel):
+    def __init__(self, feature_embedding: FeatureEmbedder, subgraph_model: Model, feature_dim_size: int = None):
+        super().__init__(model_spec=get_kwargs())
         self.embedding = feature_embedding
         self.core_model = subgraph_model
 
-        if feature_dim_size is not None:
+        self.transform_features = (feature_dim_size is not None)
+        if self.transform_features:
             user_ft_size, product_ft_size = feature_embedding.output_sizes
-            user_feature_transform = nn.Linear(user_ft_size, feature_dim_size)
-            product_feature_transform = nn.Linear(product_ft_size, feature_dim_size)
-            self.feature_transforms = user_feature_transform, product_feature_transform
-        else:
-            self.feature_transforms = None
+            self.user_feature_transform = nn.Linear(user_ft_size, feature_dim_size)
+            self.product_feature_transform = nn.Linear(product_ft_size, feature_dim_size)
 
     def forward(self, rating_data: RatingSubgraphData, time_steps):
         # unpack arguments
@@ -30,10 +29,9 @@ class GraphReconstructionModel(nn.Module, RatingDenoisingModel):
         user_features, product_features = self.embedding(user_features, product_features)
 
         # transform features to matching dim sizes
-        if self.feature_transforms is not None:
-            user_feature_transform, product_feature_transform = self.feature_transforms
-            user_features = user_feature_transform(user_features)
-            product_features = product_feature_transform(product_features)
+        if self.transform_features:
+            user_features = self.user_feature_transform(user_features)
+            product_features = self.product_feature_transform(product_features)
 
         # add batch dims as necessary
         if len(noise_map.shape) not in (3, 4):

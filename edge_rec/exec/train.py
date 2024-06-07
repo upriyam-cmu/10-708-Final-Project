@@ -1,26 +1,21 @@
 from ..datasets import RatingSubgraphData
 from ..diffusion import GaussianDiffusion
+from ..utils import tqdm, CopyArgTypes, get_kwargs, DataLogger
 
-from pathlib import Path
+from collections import deque
 from multiprocessing import cpu_count
+from pathlib import Path
+from typing import Optional, Tuple, Union
 
+from accelerate import Accelerator, DataLoaderConfiguration
+from ema_pytorch import EMA
 import numpy as np
 import torch
+from torch.optim import Adam
 from torch.utils.data import Dataset, DataLoader
 
-from torch.optim import Adam
 
-from tqdm.auto import tqdm
-from ema_pytorch import EMA
-
-from accelerate import Accelerator
-
-from typing import Optional, Tuple, TypeVar, Union
-
-__CopyArgTypes = TypeVar('__CopyArgTypes')
-
-
-def _prepare(accelerator: Accelerator, args: __CopyArgTypes) -> __CopyArgTypes:
+def _prepare(accelerator: Accelerator, args: CopyArgTypes) -> CopyArgTypes:
     if isinstance(args, (tuple, list)):
         return accelerator.prepare(*args)
     else:
@@ -65,6 +60,11 @@ class Trainer(object):
             force_batch_size: bool = False,
             train_num_steps: int = 100000,
             train_mask_unknown_ratings: bool = True,
+            # eval
+            eval_batch_size: Optional[int] = None,  # copies training batch size if None
+            n_eval_iters: int = 1,
+            eval_every: int = 200,
+            sample_on_eval: bool = True,
             # optim
             train_lr: float = 1e-4,
             adam_betas: Tuple[float, float] = (0.9, 0.99),
@@ -73,7 +73,8 @@ class Trainer(object):
             results_folder: str = './results',
             ema_update_every: int = 10,
             ema_decay: float = 0.995,
-            save_and_sample_every: int = 1000,
+            save_every_nth_eval: int = 1,
+            use_wandb: bool = False,
             # accelerator
             amp: bool = False,
             mixed_precision_type: str = 'fp16',
@@ -84,8 +85,8 @@ class Trainer(object):
         # accelerator
 
         self.accelerator = Accelerator(
-            split_batches=split_batches,
-            mixed_precision=mixed_precision_type if amp else 'no'
+            mixed_precision=mixed_precision_type if amp else 'no',
+            dataloader_config=DataLoaderConfiguration(split_batches=split_batches),
         )
 
         # model
@@ -94,13 +95,16 @@ class Trainer(object):
 
         # sampling and training hyperparameters
 
-        self.save_and_sample_every = save_and_sample_every
+        self.eval_every = eval_every
+        self.save_every = eval_every * save_every_nth_eval
+        self.sample_on_eval = sample_on_eval
 
         self.gradient_accumulate_every = gradient_accumulate_every
         assert (batch_size * gradient_accumulate_every) >= 16 or force_batch_size, \
             f'your effective batch size (train_batch_size x gradient_accumulate_every) should be at least 16 or above'
 
         self.train_num_steps = train_num_steps
+        self.n_eval_iters = n_eval_iters
 
         self.max_grad_norm = max_grad_norm
         self.train_mask_unknown_ratings = train_mask_unknown_ratings
@@ -112,7 +116,7 @@ class Trainer(object):
         )
         self.test_loader = _get_dataloader(
             dataset=test_dataset,
-            batch_size=batch_size,
+            batch_size=eval_batch_size or batch_size,
             accelerator=self.accelerator,
         )
 
@@ -147,6 +151,19 @@ class Trainer(object):
         # prepare model, dataloader, optimizer with accelerator
 
         self.model, self.optim = _prepare(self.accelerator, (self.model, self.optim))
+
+        # wandb
+
+        kwargs = get_kwargs()
+        # TODO save dataset cfg as well
+        del kwargs["train_dataset"], kwargs["test_dataset"]
+
+        self.logger = DataLogger(
+            use_wandb=use_wandb,
+            run_mode='train',
+            run_config=kwargs,
+            initial_step=self.step,
+        )
 
     @property
     def device(self):
@@ -193,11 +210,20 @@ class Trainer(object):
         accelerator = self.accelerator
         device = accelerator.device
 
-        with tqdm(initial=self.step, total=self.train_num_steps, disable=not accelerator.is_main_process) as pbar:
+        with tqdm(
+                initial=self.step,
+                total=self.train_num_steps,
+                disable=not accelerator.is_main_process,
+                desc='training loop',
+        ) as pbar:
+
+            validation_loss = float('nan')
+            training_loss_deque = deque(maxlen=100)  # average loss over this length
 
             while self.step < self.train_num_steps:
 
                 total_loss = 0.
+                self.model.train()
 
                 for _ in range(self.gradient_accumulate_every):
                     data: RatingSubgraphData = _get(self.train_loader).to(device)
@@ -211,7 +237,8 @@ class Trainer(object):
 
                     self.accelerator.backward(loss)
 
-                pbar.set_description(f'loss: {total_loss:.4f}')
+                self.logger.log(train_loss=total_loss)
+                training_loss_deque.append(total_loss)
 
                 accelerator.wait_for_everyone()
                 accelerator.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
@@ -225,22 +252,36 @@ class Trainer(object):
                 if accelerator.is_main_process:
                     self.ema.update()
 
-                    if self.step != 0 and self.step % self.save_and_sample_every == 0:
-                        self.ema.ema_model.eval()
+                    if self.step != 0 and self.step % self.save_every == 0:
+                        self.save(self.step)
+
+                    if self.step != 0 and self.step % self.eval_every == 0:
+                        self.model.eval()
 
                         with torch.inference_mode():
-                            eval_data: RatingSubgraphData = _get(self.test_loader).to(device)
-                            eval_data.ratings, eval_data.known_mask = torch.randn_like(eval_data.ratings), None
+                            eval_data: Optional[RatingSubgraphData] = None
+                            val_loss = 0.
+                            for _ in tqdm(range(self.n_eval_iters), desc="model eval"):
+                                eval_data = _get(self.test_loader).to(device)
+                                eval_data.ratings, eval_data.known_mask = torch.randn_like(eval_data.ratings) / 3, None
 
-                            val_loss = self.model(eval_data)
-                            print(f"Validation Loss: {val_loss.item()}")
-                            # val_sample = self.ema.ema_model.sample(eval_data)
-                            # np.save(
-                            #     str(self.results_folder / f"sample-{self.step}.npy"),
-                            #     val_sample[:, 0, :, :].cpu().detach().numpy()
-                            # )
-                            self.save(self.step)
+                                val_loss += self.model(eval_data).item()
 
+                            validation_loss = val_loss / self.n_eval_iters
+                            self.logger.log(validation_loss=validation_loss)
+                            # print(f"Validation Loss: {validation_loss}")
+
+                            if eval_data is not None and self.sample_on_eval:
+                                val_sample = self.model.sample(eval_data)
+                                np.save(
+                                    str(self.results_folder / f"sample-{self.step}.npy"),
+                                    val_sample.cpu().detach().numpy(),
+                                )
+
+                train_loss = sum(training_loss_deque) / len(training_loss_deque)
+
+                self.logger.log(step=self.step, commit=True)
+                pbar.set_postfix(train_loss=f"{train_loss:.4f}", valid_loss=f"{validation_loss:.4f}")
                 pbar.update(1)
 
         accelerator.print('training complete')
@@ -262,8 +303,7 @@ class Trainer(object):
 
         rating_data = rating_data.to(self.device)
         inpainting_data = (rating_data.ratings, rating_data.known_mask) if do_inpainting_sampling else None
-        rating_data.ratings = torch.randn_like(rating_data.ratings) / 3  # make it roughly -1 to 1
-        rating_data.known_mask = None
+        rating_data.ratings, rating_data.known_mask = torch.randn_like(rating_data.ratings) / 3, None
 
         if tiled_sampling:
             sampled_graph = self.model.sample_tiled(
