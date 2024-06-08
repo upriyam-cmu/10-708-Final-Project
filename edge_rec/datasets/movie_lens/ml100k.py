@@ -55,7 +55,7 @@ class RawMovieLens100K(MovieLens100K):
         )
         movie_mapping = {idx: i for i, idx in enumerate(df.index)}
 
-        x = self._process_genres(df)
+        x = self._process_genres(df, one_hot=False)
         data['movie'].x = torch.from_numpy(x).to(torch.float)
 
         self.df = x

@@ -82,7 +82,6 @@ class MovieLensDataHolder(DataHolder):
             'gender': user_data_tensor[:, 1].int(),
             'occupation': user_data_tensor[:, 2].int(),
         }
-
         assert len(movie_data_tensor.shape) == 2 and movie_data_tensor.shape[-1] == 6
         genre_multihot = torch.zeros(len(movie_data_tensor), 19, device=movie_data_tensor.device)
         genre_multihot.scatter_(1, movie_data_tensor.long(), 1.)
@@ -104,7 +103,7 @@ class MovieLensDataHolder(DataHolder):
         if self.rating_counts_transform is not None:
             # get counts
             user_counts = self._count_unique(edges, 0, self.n_users).reshape((self.n_users, 1)).float()
-            movie_counts = self._count_unique(edges, 0, self.n_movies).reshape((self.n_movies, 1)).float()
+            movie_counts = self._count_unique(edges, 1, self.n_movies).reshape((self.n_movies, 1)).float()
 
             # transform counts
             user_count_fts = self.rating_counts_transform(user_counts)
