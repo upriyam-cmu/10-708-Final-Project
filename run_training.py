@@ -74,7 +74,7 @@ def init():
         ema_update_every=10,
         ema_decay=0.995,
         save_every_nth_eval=1,
-        use_wandb=False,
+        use_wandb=True,
         # accelerator
         amp=False,
         mixed_precision_type='fp16',
