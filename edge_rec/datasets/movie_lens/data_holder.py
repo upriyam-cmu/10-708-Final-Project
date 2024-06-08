@@ -14,11 +14,21 @@ import torch
 
 
 class MovieLensDataHolder(DataHolder):
-    def __init__(self, root="./data", ml_100k=True, test_split=0.1, force_download=False,
-                 augmentations: Dict[str, Transform] = None):
+    def __init__(
+            self,
+            root="./data",
+            ml100k: bool = False,
+            ml1m: bool = False,
+            test_split=0.1,
+            force_download=False,
+            augmentations: Dict[str, Transform] = None,
+    ):
+        if np.sum([ml100k, ml1m]) != 1:
+            raise ValueError("Must specify dataset as exactly one of ML-100k or ML-1M.")
+
         super().__init__(
-            data_root=(Path(root) / ("ml100k" if ml_100k else "ml1m")),
-            dataset_class=(RawMovieLens100K if ml_100k else RawMovieLens1M),
+            data_root=(Path(root) / ("ml100k" if ml100k else "ml1m")),
+            dataset_class=(RawMovieLens100K if ml100k else RawMovieLens1M),
             test_split_ratio=test_split,
             force_download=force_download,
         )
@@ -77,15 +87,20 @@ class MovieLensDataHolder(DataHolder):
     @staticmethod
     def _get_features(user_data_tensor, movie_data_tensor):
         assert len(user_data_tensor.shape) == 2 and user_data_tensor.shape[-1] == 3
+        assert len(movie_data_tensor.shape) == 2 and movie_data_tensor.shape[-1] == 6
+        n_users, n_movies = len(user_data_tensor), len(movie_data_tensor)
+
         user_data = {
+            'id': torch.arange(n_users).int(),
             'age': user_data_tensor[:, 0].int(),
             'gender': user_data_tensor[:, 1].int(),
             'occupation': user_data_tensor[:, 2].int(),
         }
-        assert len(movie_data_tensor.shape) == 2 and movie_data_tensor.shape[-1] == 6
+
         genre_multihot = torch.zeros(len(movie_data_tensor), 19, device=movie_data_tensor.device)
         genre_multihot.scatter_(1, movie_data_tensor.long(), 1.)
         movie_data = {
+            'id': torch.arange(n_movies).int(),
             'genre_ids': movie_data_tensor.int(),
             'genre_multihot': genre_multihot[:, 1:].int(),  # drop genre idx=0 (i.e. null genre?)
         }

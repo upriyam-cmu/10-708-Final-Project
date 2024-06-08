@@ -4,6 +4,8 @@ from ....utils import get_kwargs
 
 from typing import Optional, Tuple, Union
 
+import numpy as np
+
 
 def _check_positive(value: int, name: str):
     if value <= 0:
@@ -25,16 +27,27 @@ def _get_complex_embed(arg_value: Optional[Union[int, Tuple[int, int]]], arg_nam
 class MovieLensFeatureEmbedder(FeatureEmbedder):
     def __init__(
             self,
+            ml100k: bool = False,
+            ml1m: bool = False,
+            user_id_dim: Optional[int] = 16,
             user_age_dim: Optional[int] = 4,
             user_gender_dim: Optional[int] = 2,
             user_occupation_dim: Optional[int] = 8,
             user_rating_counts_dims: Optional[Union[int, Tuple[int, int]]] = None,
+            movie_id_dim: Optional[int] = 16,
             movie_genre_ids_dim: Optional[int] = 8,
             movie_genre_ids_merge_method: Union[str, Tuple[str, int]] = 'add',  # 'add' or ('merge', n_dims)
             movie_genre_multihot_dims: Optional[Union[int, Tuple[int, int]]] = None,
             movie_rating_counts_dims: Optional[Union[int, Tuple[int, int]]] = None,
     ):
+        if np.sum([ml100k, ml1m]) != 1:
+            raise ValueError("Must specify dataset as exactly one of ML-100k or ML-1M.")
+        n_users, n_movies = (943, 1682) if ml100k else (6040, 3883)
+
         user_config = {}
+        if user_id_dim is not None:
+            _check_positive(user_id_dim, 'user_id_dim')
+            user_config['id'] = ECS.EnumEmbedding(enum_size=n_users, embedding_dim=user_id_dim)
         if user_age_dim is not None:
             _check_positive(user_age_dim, 'user_age_dim')
             user_config['age'] = ECS.EnumEmbedding(enum_size=7, embedding_dim=user_age_dim)
@@ -48,6 +61,9 @@ class MovieLensFeatureEmbedder(FeatureEmbedder):
             user_config['rating_counts'] = _get_complex_embed(user_rating_counts_dims, 'user_rating_counts_dims')
 
         movie_config = {}
+        if movie_id_dim is not None:
+            _check_positive(movie_id_dim, 'movie_id_dim')
+            movie_config['id'] = ECS.EnumEmbedding(enum_size=n_movies, embedding_dim=movie_id_dim)
         if movie_genre_ids_dim is not None:
             _check_positive(movie_genre_ids_dim, 'movie_genre_ids_dim')
             movie_config['genre_ids'] = ECS.BatchedEnumEmbedding(

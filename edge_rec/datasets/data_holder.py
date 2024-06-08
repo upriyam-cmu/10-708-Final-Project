@@ -14,13 +14,15 @@ class _DatasetWrapper(IterableDataset):
         self.data_generator = data_generator
 
     def __getitem__(self, idx=None):
+        # strip away wrapping RatingSubgraphData class
         return dict(self.data_generator())
 
     def __iter__(self):
         return self
 
     def __next__(self):
-        return self.data_generator()
+        # strip away wrapping RatingSubgraphData class
+        return dict(self.data_generator())
 
 
 class DataHolder(ABC):

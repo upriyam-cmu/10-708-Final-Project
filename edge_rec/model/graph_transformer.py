@@ -3,6 +3,7 @@ from .embed import TimeEmbedder
 
 from ..utils import Model, get_kwargs
 
+from math import sqrt
 from typing import Optional, Tuple, Union
 
 from einops import rearrange
@@ -12,12 +13,16 @@ from torch.nn import functional as F
 
 
 def build_feed_forward(in_dim, hidden_dims, out_dim, activation_fn):
-    hidden_dims = list(hidden_dims)
-    assert len(hidden_dims) == 0 or activation_fn is not None
+    avg_dim = sqrt(in_dim * out_dim)
+    hidden_dims = [int(avg_dim * h_dim) for h_dim in hidden_dims]
+    if len(hidden_dims) != 0 and activation_fn is None:
+        raise ValueError("Must specify activation function for feed-forward networks if num hidden layers > 0")
+
     components = []
     for d_in, d_out in zip([in_dim] + hidden_dims, hidden_dims + [out_dim]):
         components.append(nn.Conv2d(d_in, d_out, 1))
         components.append(activation_fn)
+
     return nn.Sequential(*components[:-1])
 
 
@@ -107,7 +112,7 @@ class RatingDecoderBlock(nn.Module):
 
 
 class GraphTransformer(Model):
-    __DEFAULT_ATTN_KWARGS = dict(heads=4, dim_head=32, num_mem_kv=4, flash=False, share_weights=True)
+    __DEFAULT_ATTN_KWARGS = dict(heads=4, dim_head=32, num_mem_kv=4, flash=False, share_weights=True, dropout=0.)
     __DEFAULT_FEED_FORWARD_KWARGS = dict(hidden_dims=(), activation_fn=None)
 
     def __init__(

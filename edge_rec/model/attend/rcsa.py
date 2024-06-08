@@ -42,10 +42,6 @@ class Stacked1DSelfAttention(nn.Module):
     def __init__(
             self,
             dim,
-            heads=4,
-            dim_head=32,
-            num_mem_kv=4,
-            flash=False,
             share_weights=True,
             speed_hack=True,
             **kwargs,
@@ -58,10 +54,7 @@ class Stacked1DSelfAttention(nn.Module):
                 d_q=dim,
                 d_k=dim,
                 d_v=dim,
-                heads=heads,
-                dim_head=dim_head,
-                num_mem_kv=num_mem_kv,
-                flash=flash,
+                **kwargs,
             )
 
             if share_weights:
@@ -71,18 +64,12 @@ class Stacked1DSelfAttention(nn.Module):
                     d_q=dim,
                     d_k=dim,
                     d_v=dim,
-                    heads=heads,
-                    dim_head=dim_head,
-                    num_mem_kv=num_mem_kv,
-                    flash=flash,
+                    **kwargs,
                 )
         else:
             self.attn_row = SelfAttention(
                 dim=dim,
-                heads=heads,
-                dim_head=dim_head,
-                num_mem_kv=num_mem_kv,
-                flash=flash,
+                **kwargs,
             )
 
             if share_weights:
@@ -90,10 +77,7 @@ class Stacked1DSelfAttention(nn.Module):
             else:
                 self.attn_col = SelfAttention(
                     dim=dim,
-                    heads=heads,
-                    dim_head=dim_head,
-                    num_mem_kv=num_mem_kv,
-                    flash=flash,
+                    **kwargs,
                 )
 
         assert self.attn_row.out_dim == self.attn_col.out_dim == dim
@@ -139,10 +123,6 @@ class SeparableCrossAttention(nn.Module):
     def __init__(
             self,
             d_row_ft, d_col_ft, d_channel,
-            heads=4,
-            dim_head=32,
-            num_mem_kv=4,
-            flash=False,
             share_weights=True,
             **kwargs,
     ):
@@ -152,10 +132,7 @@ class SeparableCrossAttention(nn.Module):
             d_q=d_row_ft,
             d_k=d_col_ft,
             d_v=d_channel,
-            heads=heads,
-            dim_head=dim_head,
-            num_mem_kv=num_mem_kv,
-            flash=flash,
+            **kwargs,
         )
 
         if share_weights and d_row_ft == d_col_ft:
@@ -165,10 +142,7 @@ class SeparableCrossAttention(nn.Module):
                 d_q=d_col_ft,
                 d_k=d_row_ft,
                 d_v=d_channel,
-                heads=heads,
-                dim_head=dim_head,
-                num_mem_kv=num_mem_kv,
-                flash=flash,
+                **kwargs,
             )
 
             if share_weights:

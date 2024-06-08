@@ -105,6 +105,7 @@ class AttentionBase(nn.Module):
             dim_head=32,
             num_mem_kv=4,
             flash=False,
+            dropout=0.,
             **kwargs,
     ):
         super().__init__()
@@ -112,7 +113,7 @@ class AttentionBase(nn.Module):
         hidden_dim = dim_head * heads
         self.out_dim = d_v
 
-        self.attend = Attend(flash=flash)
+        self.attend = Attend(flash=flash, dropout=dropout)
 
         self.mem_mask = nn.Parameter(torch.ones(1, 1, num_mem_kv).bool(), requires_grad=False)
         self.mem_kv = nn.Parameter(torch.randn(2, heads, num_mem_kv, dim_head))
@@ -153,10 +154,6 @@ class SelfAttention(nn.Module):
     def __init__(
             self,
             dim,
-            heads=4,
-            dim_head=32,
-            num_mem_kv=4,
-            flash=False,
             **kwargs,
     ):
         super().__init__()
@@ -164,10 +161,7 @@ class SelfAttention(nn.Module):
             d_q=dim,
             d_k=dim,
             d_v=dim,
-            heads=heads,
-            dim_head=dim_head,
-            num_mem_kv=num_mem_kv,
-            flash=flash,
+            **kwargs,
         )
 
     def forward(self, x, mask=None):
@@ -182,10 +176,6 @@ class CrossAttention(nn.Module):
     def __init__(
             self,
             d_qk, d_v,
-            heads=4,
-            dim_head=32,
-            num_mem_kv=4,
-            flash=False,
             **kwargs,
     ):
         super().__init__()
@@ -193,10 +183,7 @@ class CrossAttention(nn.Module):
             d_q=d_qk,
             d_k=d_qk,
             d_v=d_v,
-            heads=heads,
-            dim_head=dim_head,
-            num_mem_kv=num_mem_kv,
-            flash=flash,
+            **kwargs,
         )
 
     def forward(self, qk, v, mask=None):
