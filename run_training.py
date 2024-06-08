@@ -45,6 +45,8 @@ def init():
     )
     model = GraphReconstructionModel(embed, core, feature_dim_size=None)
     print("model size:", model.model_size)
+    print("embedding size:", model.embedding.model_size)
+    print("transformer size:", model.core_model.model_size)
 
     # diffusion/training
     diffusion_model = GaussianDiffusion(model, image_size=50)

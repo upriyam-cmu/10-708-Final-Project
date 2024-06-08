@@ -5,6 +5,10 @@ from scipy.special import ndtri as inv_normal_cdf
 import torch
 
 
+def _numel(arr):
+    return np.prod(arr.shape, dtype=int)
+
+
 class Transform(ABC):
     def __call__(self, *args, **kwargs):
         return self.apply(*args, **kwargs)
@@ -63,6 +67,9 @@ class RatingsTransform:
             self.threshold = threshold
 
         def apply(self, ratings, *, numpy=False, **kwargs):
+            if _numel(ratings) == 0:
+                return ratings
+
             where = np.where if numpy else torch.where
             return where(ratings > self.threshold, self.above, self.below)
 
@@ -76,6 +83,9 @@ class RatingsTransform:
                 raise ValueError("Must specify both scale/shift, or neither")
 
         def apply(self, ratings, *, numpy=False, **kwargs):
+            if _numel(ratings) == 0:
+                return ratings
+
             if self.shift_scale is None:
                 if numpy:
                     shift, scale = np.mean(ratings), np.std(ratings)
@@ -89,6 +99,9 @@ class RatingsTransform:
         def invert(self, ratings, **kwargs):
             if self.shift_scale is None:
                 raise ValueError(f"Cannot invert {self.__class__} with unspecified parameters")
+
+            if _numel(ratings) == 0:
+                return ratings
 
             shift, scale = self.shift_scale
             return ratings * scale + shift
@@ -152,6 +165,9 @@ class RatingsTransform:
             if self.anchor_quantiles is None:
                 raise ValueError(f"Cannot apply {self.__class__} without fitting to distribution first")
 
+            if _numel(ratings) == 0:
+                return ratings
+
             if not numpy:
                 device = ratings.device
                 ratings = ratings.detach().cpu().numpy()
@@ -179,6 +195,9 @@ class RatingsTransform:
         def invert(self, ratings, *, numpy=False, **kwargs):
             if self.anchor_quantiles is None:
                 raise ValueError(f"Cannot apply {self.__class__} without fitting to distribution first")
+
+            if _numel(ratings) == 0:
+                return ratings
 
             low, high = self.output_range
             normal_quantiles = (ratings - low) / (high - low)

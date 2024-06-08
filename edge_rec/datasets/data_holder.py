@@ -13,16 +13,23 @@ class _DatasetWrapper(IterableDataset):
     def __init__(self, data_generator):
         self.data_generator = data_generator
 
-    def __getitem__(self, idx=None):
+    def _get_subgraph(self):
+        # loop until you get a subgraph with data
+        ratings_data: RatingSubgraphData = self.data_generator()
+        while ratings_data.known_mask.sum() == 0:
+            ratings_data: RatingSubgraphData = self.data_generator()
+
         # strip away wrapping RatingSubgraphData class
-        return dict(self.data_generator())
+        return dict(ratings_data)
+
+    def __getitem__(self, idx=None):
+        return self._get_subgraph()
 
     def __iter__(self):
         return self
 
     def __next__(self):
-        # strip away wrapping RatingSubgraphData class
-        return dict(self.data_generator())
+        return self._get_subgraph()
 
 
 class DataHolder(ABC):
