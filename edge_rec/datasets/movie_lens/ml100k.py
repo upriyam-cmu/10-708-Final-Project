@@ -3,9 +3,10 @@ import pandas as pd
 import torch
 from torch_geometric.data import HeteroData
 from torch_geometric.datasets import MovieLens100K
+from .preprocessing import MovieLensPreprocessingMixin
 
 
-class RawMovieLens100K(MovieLens100K):
+class RawMovieLens100K(MovieLens100K, MovieLensPreprocessingMixin):
     MOVIE_HEADERS = [
         "movieId", "title", "releaseDate", "videoReleaseDate", "IMDb URL",
         "unknown", "Action", "Adventure", "Animation", "Children's", "Comedy",
@@ -24,28 +25,23 @@ class RawMovieLens100K(MovieLens100K):
         df["age"] = pd.cut(df["age"], bins=bins, labels=labels)
         return df
 
-    def _process_genres(self, df, one_hot=True):
-        l_df = df[self.MOVIE_HEADERS[6:]].values
-
-        if one_hot:
-            return l_df
-
-        max_genres = l_df.sum(axis=1).max()
-        idx_list = []
-        for i in range(l_df.shape[0]):
-            idxs = np.where(l_df[i, :] == 1)[0] + 1
-            missing = max_genres - len(idxs)
-            if missing > 0:
-                idxs = np.array(list(idxs) + missing * [0])
-            idx_list.append(idxs)
-        out = np.stack(idx_list)
-        return out
+    def _load_ratings(self):
+        dfs = [
+            pd.read_csv(
+                    self.raw_paths[i],
+                    sep='\t',
+                    header=None,
+                    names=self.RATING_HEADERS,
+            ) for i in (2,3)
+        ]
+        return pd.concat(dfs, ignore_index=True)
 
     def process(self) -> None:
         data = HeteroData()
+        ratings_df = self._load_ratings()
 
         # Process movie data:
-        df = pd.read_csv(
+        full_df = pd.read_csv(
             self.raw_paths[0],
             sep='|',
             header=None,
@@ -53,15 +49,16 @@ class RawMovieLens100K(MovieLens100K):
             index_col='movieId',
             encoding='ISO-8859-1',
         )
+        df = self._remove_low_occurrence(ratings_df, full_df, "movieId")
         movie_mapping = {idx: i for i, idx in enumerate(df.index)}
 
-        x = self._process_genres(df, one_hot=False)
+        x = self._process_genres(df[self.MOVIE_HEADERS[6:]].values, one_hot=False)
         data['movie'].x = torch.from_numpy(x).to(torch.float)
 
         self.df = x
 
         # Process user data:
-        df = pd.read_csv(
+        full_df = pd.read_csv(
             self.raw_paths[1],
             sep='|',
             header=None,
@@ -69,6 +66,7 @@ class RawMovieLens100K(MovieLens100K):
             index_col='userId',
             encoding='ISO-8859-1',
         )
+        df = self._remove_low_occurrence(ratings_df, full_df, "userId")
         user_mapping = {idx: i for i, idx in enumerate(df.index)}
 
         age = self._bucket_ages(df)["age"].to_numpy()[:, None]
@@ -83,12 +81,7 @@ class RawMovieLens100K(MovieLens100K):
         data['user'].x = torch.cat([age, gender, occupation], dim=-1)
 
         # Process rating data for training:
-        df = pd.read_csv(
-            self.raw_paths[2],
-            sep='\t',
-            header=None,
-            names=self.RATING_HEADERS,
-        )
+        df = self._remove_low_occurrence(ratings_df, ratings_df, ["userId", "movieId"])
 
         src = [user_mapping[idx] for idx in df['userId']]
         dst = [movie_mapping[idx] for idx in df['movieId']]
@@ -104,22 +97,6 @@ class RawMovieLens100K(MovieLens100K):
         data['movie', 'rated_by', 'user'].edge_index = edge_index.flip([0])
         data['movie', 'rated_by', 'user'].rating = rating
         data['movie', 'rated_by', 'user'].time = time
-
-        # Process rating data for testing:
-        df = pd.read_csv(
-            self.raw_paths[3],
-            sep='\t',
-            header=None,
-            names=self.RATING_HEADERS,
-        )
-
-        src = [user_mapping[idx] for idx in df['userId']]
-        dst = [movie_mapping[idx] for idx in df['movieId']]
-        edge_label_index = torch.tensor([src, dst])
-        data['user', 'rates', 'movie'].edge_label_index = edge_label_index
-
-        edge_label = torch.from_numpy(df['rating'].values).to(torch.float)
-        data['user', 'rates', 'movie'].edge_label = edge_label
 
         if self.pre_transform is not None:
             data = self.pre_transform(data)

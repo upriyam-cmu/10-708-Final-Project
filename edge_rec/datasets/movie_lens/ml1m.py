@@ -3,9 +3,9 @@ import pandas as pd
 import torch
 from torch_geometric.data import HeteroData
 from torch_geometric.datasets import MovieLens1M
+from .preprocessing import MovieLensPreprocessingMixin
 
-
-class RawMovieLens1M(MovieLens1M):
+class RawMovieLens1M(MovieLens1M, MovieLensPreprocessingMixin):
     MOVIE_HEADERS = ["movieId", "title", "genres"]
     USER_HEADERS = ["userId", "gender", "age", "occupation", "zipCode"]
     RATING_HEADERS = ['userId', 'movieId', 'rating', 'timestamp']
@@ -13,28 +13,22 @@ class RawMovieLens1M(MovieLens1M):
     def __init__(self, root, transform=None, pre_transform=None, force_reload=False):
         super(RawMovieLens1M, self).__init__(root, transform, pre_transform, force_reload)
 
-    def _process_genres(self, df, one_hot=True):
-        l = df["genres"].str.get_dummies('|').values
-
-        if one_hot:
-            return l
-
-        max_genres = l.sum(axis=1).max()
-        idx_list = []
-        for i in range(l.shape[0]):
-            idxs = np.where(l[i, :] == 1)[0] + 1
-            missing = max_genres - len(idxs)
-            if missing > 0:
-                idxs = np.array(list(idxs) + missing * [0])
-            idx_list.append(idxs)
-        out = np.stack(idx_list)
-        return out
+    def _load_ratings(self):
+        return pd.read_csv(
+            self.raw_paths[2],
+            sep='::',
+            header=None,
+            names=self.RATING_HEADERS,
+            encoding='ISO-8859-1',
+            engine='python',
+        )
 
     def process(self) -> None:
         data = HeteroData()
+        ratings_df = self._load_ratings()
 
         # Process movie data:
-        df = pd.read_csv(
+        full_df = pd.read_csv(
             self.raw_paths[0],
             sep='::',
             header=None,
@@ -43,15 +37,15 @@ class RawMovieLens1M(MovieLens1M):
             encoding='ISO-8859-1',
             engine='python',
         )
+        df = self._remove_low_occurrence(ratings_df, full_df, "movieId")
         movie_mapping = {idx: i for i, idx in enumerate(df.index)}
 
-        genres = self._process_genres(df, one_hot=False)
+        genres = self._process_genres(df["genres"].str.get_dummies('|').values, one_hot=False)
         genres = torch.from_numpy(genres).to(torch.float)
 
         data['movie'].x = genres
-
         # Process user data:
-        df = pd.read_csv(
+        full_df = pd.read_csv(
             self.raw_paths[1],
             sep='::',
             header=None,
@@ -61,6 +55,7 @@ class RawMovieLens1M(MovieLens1M):
             encoding='ISO-8859-1',
             engine='python',
         )
+        df = self._remove_low_occurrence(ratings_df, full_df, "userId")
         user_mapping = {idx: i for i, idx in enumerate(df.index)}
 
         age = df['age'].str.get_dummies().values.argmax(axis=1)[:, None]
@@ -75,17 +70,8 @@ class RawMovieLens1M(MovieLens1M):
         data['user'].x = torch.cat([age, gender, occupation], dim=-1)
 
         self.int_user_data = df
-
         # Process rating data:
-        df = pd.read_csv(
-            self.raw_paths[2],
-            sep='::',
-            header=None,
-            names=self.RATING_HEADERS,
-            encoding='ISO-8859-1',
-            engine='python',
-        )
-
+        df = self._remove_low_occurrence(ratings_df, ratings_df, ["userId", "movieId"])
         src = [user_mapping[idx] for idx in df['userId']]
         dst = [movie_mapping[idx] for idx in df['movieId']]
         edge_index = torch.tensor([src, dst])
@@ -103,5 +89,5 @@ class RawMovieLens1M(MovieLens1M):
 
         if self.pre_transform is not None:
             data = self.pre_transform(data)
-
+        
         self.save([data], self.processed_paths[0])
