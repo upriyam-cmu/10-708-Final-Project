@@ -1,3 +1,5 @@
+from ..utils import Configurable, get_kwargs
+
 from abc import ABC, abstractmethod
 
 import numpy as np
@@ -9,7 +11,7 @@ def _numel(arr):
     return np.prod(arr.shape, dtype=int)
 
 
-class Transform(ABC):
+class Transform(Configurable, ABC):
     def __call__(self, *args, **kwargs):
         return self.apply(*args, **kwargs)
 
@@ -28,6 +30,9 @@ class Transform(ABC):
 
 
 class __Identity(Transform):
+    def __init__(self):
+        super().__init__(config_spec=get_kwargs())
+
     def apply(self, single_arg, **kwargs):
         return single_arg
 
@@ -37,6 +42,7 @@ class __Identity(Transform):
 
 class __Compose(Transform):
     def __init__(self, *transforms: Transform):
+        super().__init__(config_spec=get_kwargs())
         self.transforms = transforms
 
     def fit(self, *args, **kwargs):
@@ -62,6 +68,8 @@ del __Identity, __Compose
 class RatingsTransform:
     class ToBinary(Transform):
         def __init__(self, below=-1, above=1, threshold=1e-4):
+            super().__init__(config_spec=get_kwargs())
+
             self.below = below
             self.above = above
             self.threshold = threshold
@@ -75,6 +83,8 @@ class RatingsTransform:
 
     class ShiftScale(Transform):
         def __init__(self, shift=None, scale=None):
+            super().__init__(config_spec=get_kwargs())
+
             if shift is not None and scale is not None:
                 self.shift_scale = shift, scale
             elif scale is None and shift is None:
@@ -108,6 +118,8 @@ class RatingsTransform:
 
     class ToGaussian(Transform):
         def __init__(self, possible_ratings=(1, 2, 3, 4, 5), output_range=(-1, 1), add_noise=True):
+            super().__init__(config_spec=get_kwargs())
+
             self.possible_ratings = np.array(possible_ratings)
             self.output_range = output_range
             self.add_noise = add_noise
@@ -222,6 +234,7 @@ class RatingsTransform:
 class FeatureTransform:
     class LogPolynomial(Transform):
         def __init__(self, degree):
+            super().__init__(config_spec=get_kwargs())
             self.degree = degree
 
         def apply(self, feature, **kwargs):

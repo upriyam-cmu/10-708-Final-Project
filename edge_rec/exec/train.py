@@ -1,11 +1,14 @@
-from ..datasets import RatingSubgraphData
+from .evaluate import compute_metrics_from_ratings, compute_metrics_from_interactions, METRIC_NAMES, DEFAULT_TOP_K
+
+from ..datasets import RatingSubgraphData, DataHolder
 from ..diffusion import GaussianDiffusion
 from ..utils import tqdm, CopyArgTypes, get_kwargs, DataLogger
 
 from collections import deque
+from functools import partial
 from multiprocessing import cpu_count
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import Dict, Optional, Tuple, Union
 
 from accelerate import Accelerator, DataLoaderConfiguration
 from ema_pytorch import EMA
@@ -50,9 +53,10 @@ class Trainer(object):
             self,
             # model
             diffusion_model: GaussianDiffusion,
-            # datasets
-            train_dataset: Optional[Dataset] = None,
-            test_dataset: Optional[Dataset] = None,
+            # dataset
+            data_holder: Optional[DataHolder] = None,
+            subgraph_size: Optional[int] = None,
+            target_density: Optional[float] = None,
             *,
             # training
             batch_size: int = 16,
@@ -74,7 +78,9 @@ class Trainer(object):
             ema_update_every: int = 10,
             ema_decay: float = 0.995,
             save_every_nth_eval: int = 1,
+            score_on_save: bool = True,
             use_wandb: bool = False,
+            save_config: bool = True,
             # accelerator
             amp: bool = False,
             mixed_precision_type: str = 'fp16',
@@ -98,6 +104,7 @@ class Trainer(object):
         self.eval_every = eval_every
         self.save_every = eval_every * save_every_nth_eval
         self.sample_on_eval = sample_on_eval
+        self.score_on_save = score_on_save
 
         self.gradient_accumulate_every = gradient_accumulate_every
         assert (batch_size * gradient_accumulate_every) >= 16 or force_batch_size, \
@@ -109,16 +116,29 @@ class Trainer(object):
         self.max_grad_norm = max_grad_norm
         self.train_mask_unknown_ratings = train_mask_unknown_ratings
 
-        self.train_loader = _get_dataloader(
-            dataset=train_dataset,
-            batch_size=batch_size,
-            accelerator=self.accelerator,
-        )
-        self.test_loader = _get_dataloader(
-            dataset=test_dataset,
-            batch_size=eval_batch_size or batch_size,
-            accelerator=self.accelerator,
-        )
+        self.data_holder = data_holder
+        self.subgraph_sampling_args = subgraph_size, target_density
+        if data_holder is not None:
+            self.train_loader = _get_dataloader(
+                dataset=data_holder.get_dataset(
+                    subgraph_size=subgraph_size,
+                    target_density=target_density,
+                    train=True,
+                ),
+                batch_size=batch_size,
+                accelerator=self.accelerator,
+            )
+            self.test_loader = _get_dataloader(
+                dataset=data_holder.get_dataset(
+                    subgraph_size=subgraph_size,
+                    target_density=target_density,
+                    train=False,
+                ),
+                batch_size=eval_batch_size or batch_size,
+                accelerator=self.accelerator,
+            )
+        else:
+            self.train_loader, self.test_loader = None, None
 
         # optimizer
 
@@ -154,15 +174,13 @@ class Trainer(object):
 
         # wandb
 
-        kwargs = get_kwargs()
-        # TODO save dataset cfg as well
-        del kwargs["train_dataset"], kwargs["test_dataset"]
-
         self.logger = DataLogger(
             use_wandb=use_wandb,
             run_mode='train',
-            run_config=kwargs,
+            run_config=get_kwargs(),
             initial_step=self.step,
+            # ignore_numeric=tuple(METRIC_NAMES),
+            save_config=save_config,
         )
 
     @property
@@ -204,8 +222,8 @@ class Trainer(object):
             self.accelerator.scaler.load_state_dict(data['scaler'])
 
     def train(self):
-        if self.train_loader is None:
-            raise ValueError("Cannot train without defined train_loader")
+        if self.data_holder is None or self.train_loader is None or self.test_loader is None:
+            raise ValueError("Cannot train without defined train_loader/test_loader")
 
         accelerator = self.accelerator
         device = accelerator.device
@@ -255,11 +273,24 @@ class Trainer(object):
                     if self.step != 0 and self.step % self.save_every == 0:
                         self.save(self.step)
 
+                        if self.score_on_save:
+                            metrics = self.score(
+                                predicting_ratings=True,  # TODO make configurable
+                                n_samples=10,
+                                do_inpainting_sampling=True,
+                            )
+
+                            loggable_metrics = {}
+                            for metric, scores in metrics.items():
+                                assert len(scores) == len(DEFAULT_TOP_K)
+                                for top_k, score in zip(DEFAULT_TOP_K, scores):
+                                    loggable_metrics[f"{metric}/{metric} @ K={top_k}"] = score
+                            self.logger.log(loggable_metrics)
+
                     if self.step != 0 and self.step % self.eval_every == 0:
                         self.model.eval()
 
                         with torch.inference_mode():
-                            eval_data: Optional[RatingSubgraphData] = None
                             val_loss = 0.
                             for _ in tqdm(range(self.n_eval_iters), desc="model eval"):
                                 eval_data = _get(self.test_loader).to(device)
@@ -269,13 +300,11 @@ class Trainer(object):
 
                             validation_loss = val_loss / self.n_eval_iters
                             self.logger.log(validation_loss=validation_loss)
-                            # print(f"Validation Loss: {validation_loss}")
 
-                            if eval_data is not None and self.sample_on_eval:
-                                val_sample = self.model.sample(eval_data)
-                                np.save(
-                                    str(self.results_folder / f"sample-{self.step}.npy"),
-                                    val_sample.cpu().detach().numpy(),
+                            if self.sample_on_eval:
+                                self.eval(
+                                    rating_data=_get(self.test_loader).to(device),
+                                    do_inpainting_sampling=True,
                                 )
 
                 train_loss = sum(training_loss_deque) / len(training_loss_deque)
@@ -288,16 +317,27 @@ class Trainer(object):
 
     def eval(
             self,
-            rating_data: RatingSubgraphData,
             milestone: Optional[int] = None,
+            rating_data: Optional[RatingSubgraphData] = None,
             tiled_sampling: bool = False,
             batch_size: Optional[int] = None,
             subgraph_size: Optional[Union[int, Tuple[int, int]]] = None,
             do_inpainting_sampling: bool = False,
             silence_inner_tqdm: bool = False,
+            save_sampled_graph: bool = True,
     ) -> torch.Tensor:
         if milestone is not None:
             self.load(milestone)
+
+        if rating_data is None:
+            sampling_subgraph_size, sampling_target_density = self.subgraph_sampling_args
+
+            rating_data = self.data_holder.get_subgraph(
+                subgraph_size=sampling_subgraph_size,
+                target_density=sampling_target_density,
+                return_train_edges=True,
+                return_test_edges=False,
+            )
 
         rating_data, _ = rating_data.with_batching()
 
@@ -321,5 +361,97 @@ class Trainer(object):
             )
 
         sampled_graph = sampled_graph.detach().cpu()
-        np.save(str(self.results_folder / f"eval-sample-{milestone}.npy"), sampled_graph.numpy())
+        if save_sampled_graph:
+            np.save(str(self.results_folder / f"eval-sample-{milestone}.npy"), sampled_graph.numpy())
+
         return sampled_graph
+
+    def score(
+            self,
+            milestone: Optional[int] = None,
+            predicting_ratings: bool = False,
+            predicting_interactions: bool = False,
+            n_samples: int = 1,  # number of samples to average over
+            tiled_sampling: bool = False,
+            batch_size: Optional[int] = None,
+            subgraph_size: Optional[Union[int, Tuple[int, int]]] = None,
+            do_inpainting_sampling: bool = False,
+            silence_inner_tqdm: bool = False,
+    ) -> Dict[str, np.ndarray]:
+        if milestone is not None:
+            self.load(milestone)
+
+        sampling_subgraph_size, sampling_target_density = self.subgraph_sampling_args
+
+        # get metric compute fn
+        if np.sum([predicting_ratings, predicting_interactions]) != 1:
+            raise ValueError(
+                "Must specify scoring using exactly one metric: "
+                "'predicting_ratings' or 'predicting_interactions'"
+            )
+        if predicting_ratings:
+            # get transformation object, if possible
+            for field_name in (
+                    'ratings_transform',
+                    'rating_transform',
+            ):
+                transform = getattr(self.data_holder, field_name, None)
+                if transform is not None:
+                    break
+
+            # build metric compute fn
+            compute_metrics = partial(
+                compute_metrics_from_ratings,
+                rating_transform=transform,
+            )
+        else:
+            compute_metrics = compute_metrics_from_interactions
+
+        # compute metrics
+        metrics = {metric: [] for metric in METRIC_NAMES}
+        for _ in tqdm(range(n_samples), desc="score model -- compute average metrics"):
+            # generate data for sampling
+            user_indices, product_indices = self.data_holder.get_subgraph_indices(
+                subgraph_size=sampling_subgraph_size,
+                target_density=sampling_target_density,
+            )
+            rating_data_train = self.data_holder.slice_subgraph(
+                user_indices=user_indices,
+                product_indices=product_indices,
+                return_train_edges=True,
+                return_test_edges=False,
+            )
+            rating_data_test = self.data_holder.slice_subgraph(
+                user_indices=user_indices,
+                product_indices=product_indices,
+                return_train_edges=False,
+                return_test_edges=True,
+            )
+            denoised_graph = self.eval(
+                rating_data=rating_data_train.clone(),
+                milestone=None,  # already loaded at top of function
+                do_inpainting_sampling=do_inpainting_sampling,
+                tiled_sampling=tiled_sampling,
+                batch_size=batch_size,
+                subgraph_size=subgraph_size,
+                silence_inner_tqdm=silence_inner_tqdm,
+                save_sampled_graph=False,
+            )
+
+            # compute metrics
+            computed_metrics = compute_metrics(
+                predicted_graph=denoised_graph,
+                train_rating_data=rating_data_train,
+                test_rating_data=rating_data_test,
+            )
+
+            # collate metrics
+            assert len(computed_metrics) == len(METRIC_NAMES) == len(metrics)
+            for key, stats in computed_metrics.items():
+                metrics[key].append(stats)
+
+        # compute average metrics
+        return {
+            key: sum(values) / len(values)
+            for key, values in metrics.items()
+        }

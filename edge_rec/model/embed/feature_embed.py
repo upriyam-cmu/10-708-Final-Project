@@ -29,7 +29,7 @@ class EmbedderConfigurationSchema:
         }
 
     @property
-    def model_spec(self) -> dict:
+    def config_spec(self) -> dict:
         return merge_dicts(
             {},
             self._generate_output_size_dicts(self.user_config, prefix="user"),
@@ -130,8 +130,8 @@ class EmbedderConfigurationSchema:
 
 
 class FeatureEmbedder(Model):
-    def __init__(self, config: EmbedderConfigurationSchema, model_spec: Optional[dict] = None):
-        super().__init__(model_spec=(model_spec or config.model_spec))
+    def __init__(self, config: EmbedderConfigurationSchema, config_spec: Optional[dict] = None):
+        super().__init__(config_spec=(config_spec or config.config_spec))
         self.embedding_config = config
         self._cfg_modules = config.modules  # so that all modules are registered by pytorch
 

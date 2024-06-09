@@ -79,5 +79,5 @@ class MovieLensFeatureEmbedder(FeatureEmbedder):
 
         super().__init__(
             config=ECS(user_config=user_config, product_config=movie_config),
-            model_spec=get_kwargs(),
+            config_spec=get_kwargs(),
         )

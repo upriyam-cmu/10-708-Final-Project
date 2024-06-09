@@ -1,9 +1,10 @@
-import numpy as np
+from .preprocessing import MovieLensPreprocessingMixin
+
 import pandas as pd
 import torch
 from torch_geometric.data import HeteroData
 from torch_geometric.datasets import MovieLens1M
-from .preprocessing import MovieLensPreprocessingMixin
+
 
 class RawMovieLens1M(MovieLens1M, MovieLensPreprocessingMixin):
     MOVIE_HEADERS = ["movieId", "title", "genres"]
@@ -89,5 +90,5 @@ class RawMovieLens1M(MovieLens1M, MovieLensPreprocessingMixin):
 
         if self.pre_transform is not None:
             data = self.pre_transform(data)
-        
+
         self.save([data], self.processed_paths[0])

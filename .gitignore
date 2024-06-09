@@ -166,3 +166,4 @@ data/
 models/
 metrics/
 wandb/
+config/

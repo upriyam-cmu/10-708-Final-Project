@@ -1,6 +1,8 @@
 from .data import RatingSubgraphData
 from .transforms import Transform
 
+from ..utils import Configurable
+
 from abc import ABC, abstractmethod
 from functools import partial
 from typing import Optional, Tuple, Union
@@ -32,8 +34,9 @@ class _DatasetWrapper(IterableDataset):
         return self._get_subgraph()
 
 
-class DataHolder(ABC):
-    def __init__(self, *, data_root, dataset_class, test_split_ratio=0.1, force_download=False):
+class DataHolder(Configurable, ABC):
+    def __init__(self, *, data_root, dataset_class, test_split_ratio=0.1, force_download=False, config_spec=None):
+        super().__init__(config_spec=config_spec)
         self.test_split_ratio = test_split_ratio
 
         processed_data_path = data_root / "processed/data.pt"

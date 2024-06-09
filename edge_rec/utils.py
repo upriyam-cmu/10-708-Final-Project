@@ -1,6 +1,9 @@
+from datetime import datetime
 from functools import partial
 import inspect
+import json
 from numbers import Number
+import os
 import sys
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TypeVar, Union
 
@@ -62,11 +65,16 @@ class DataLogger:
             run_mode: str,  # (e.g.) 'train' or 'eval'
             run_config: dict,
             initial_step: int = 0,
+            ignore_numeric: Optional[Tuple[str]] = (),
+            save_config: bool = True,
     ):
+        # set up internal state
         self._data_log: Tuple[Dict[str, List[float]], Dict[str, Any], Set[str]] = dict(), dict(), set()
         self._step = initial_step
         self._step_name = f"{run_mode}_step"
+        self._ignore_numeric = ignore_numeric
 
+        # set up wandb logging, maybe
         if use_wandb:
             import wandb
 
@@ -77,11 +85,21 @@ class DataLogger:
                 save_code=True,
                 job_type=run_mode,
             )
+            run_name = self._wandb_run.name
 
             wandb.define_metric(self._step_name)
             wandb.define_metric("*", step_metric=self._step_name)
         else:
             self._wandb_run = None
+            run_name = datetime.now().strftime('%Y-%m-%d.%H-%M-%S-%f')
+
+        # save initial config
+        os.makedirs("./config", exist_ok=True)
+        if save_config:
+            with open(f"./config/{run_name}.json", 'w') as f:
+                json.dump(run_config, f, indent=4)
+            with open("./config/latest.json", 'w') as f:
+                json.dump(run_config, f, indent=4)
 
     @staticmethod
     def _get_all_stats(numerical_stats_dict, misc_stats_dict, key) -> Dict[str, Any]:
@@ -123,7 +141,14 @@ class DataLogger:
         # update all logged values
         for k, v in values.items():
             # get dict to update based on value type
-            dict_ = numerical_stats if isinstance(v, Number) else misc_stats
+            if isinstance(v, Number):
+                dict_ = numerical_stats
+                for prefix in self._ignore_numeric:
+                    if k.startswith(prefix):
+                        dict_ = misc_stats
+                        break
+            else:
+                dict_ = misc_stats
 
             # update dict
             if k not in dict_:
@@ -163,39 +188,94 @@ class DataLogger:
             self._step += 1
 
 
-class Model(nn.Module):
-    def __init__(self, model_spec: dict = None, *args, **kwargs):
+class Configurable:
+    def __init__(self, config_spec: dict = None, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._model_spec = model_spec
+        self.__config_spec = config_spec
+
+    @property
+    def config_spec(self) -> dict:
+        assert self.__config_spec is not None, f"Forgot to set model_spec for {self.__class__}"
+        return self.__config_spec
+
+
+class Model(nn.Module, Configurable):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
     @property
     def model_size(self) -> int:
         return sum(p.numel() for p in self.parameters())
 
-    @property
-    def model_spec(self) -> dict:
-        assert self._model_spec is not None, f"Forgot to set model_spec for {self.__class__}"
-        return self._model_spec
+
+__CLASS_KEY = '__class__'
+
+
+def _clean_kwargs(key, value) -> tuple:
+    if key == 'self':
+        klass = value.__class__
+        key = __CLASS_KEY  # replace 'self' with '__class__'
+        value = klass.__module__ + '.' + klass.__qualname__
+    elif isinstance(value, Configurable):
+        value = value.config_spec
+    elif isinstance(value, dict):
+        value = dict([_clean_kwargs(k, v) for k, v in value.items()])
+
+    return key, value
 
 
 def get_kwargs() -> dict:
     frame = inspect.currentframe().f_back
     keys, _, _, values = inspect.getargvalues(frame)
-    kwargs = {}
-    for key in keys:
-        # get appropriate form of value
-        value = values[key]
-        if key == 'self':
-            klass = value.__class__
-            key = '__class__'  # replace 'self' with '__class__'
-            value = klass.__module__ + '.' + klass.__name__
-        elif isinstance(value, Model):
-            value = value.model_spec
+    return dict([_clean_kwargs(key, values[key]) for key in keys])
 
-        # save value for key
-        kwargs[key] = value
 
-    return kwargs
+def _reconstruct_objects_from_config(cfg_item, overrides):
+    if not isinstance(cfg_item, dict):
+        if overrides is not None:
+            cfg_item = _reconstruct_objects_from_config(overrides, None)
+        return tuple(cfg_item) if isinstance(cfg_item, list) else cfg_item
+
+    cfg_item = {
+        key: _reconstruct_objects_from_config(
+            value,
+            None if overrides is None or key not in overrides else overrides[key],
+        )
+        for key, value in cfg_item.items()
+    }
+
+    if __CLASS_KEY not in cfg_item:
+        return cfg_item
+
+    import edge_rec  # not sure why is this needed, but it is
+
+    klass = eval(cfg_item[__CLASS_KEY])
+    del cfg_item[__CLASS_KEY]
+
+    # TODO make more robust by separating positional/keyword arguments
+    return klass(**cfg_item)
+
+
+# noinspection PyUnresolvedReferences
+def load_config(config_path: str, **overrides) -> tuple:
+    # load all necessary classes
+    from edge_rec import datasets, diffusion, exec, model
+
+    # load config
+    __DEFAULT_OVERRIDES = dict(
+        use_wandb=False,
+        save_config=False,
+    )
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+
+    # build objects
+    trainer = _reconstruct_objects_from_config(config, overrides={**__DEFAULT_OVERRIDES, **overrides})
+    model = trainer.model.model
+    data_holder = trainer.data_holder
+
+    # return key objects
+    return data_holder, model, trainer
 
 
 def stack_dicts(items: list):

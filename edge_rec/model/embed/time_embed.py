@@ -17,7 +17,7 @@ class TimeEmbedder(Model, ABC):
 
 class SinusoidalPositionalEmbedding(TimeEmbedder):
     def __init__(self, dim: int, theta: float = 10000):
-        super().__init__(model_spec=get_kwargs())
+        super().__init__(config_spec=get_kwargs())
         dim = dim + dim % 2  # make dim even
         self.dim = dim
         self.theta = theta
@@ -41,7 +41,7 @@ class RandomOrLearnedSinusoidalPositionalEmbedding(TimeEmbedder):
     """ https://github.com/crowsonkb/v-diffusion-jax/blob/master/diffusion/models/danbooru_128.py#L8 """
 
     def __init__(self, dim: int, is_random: bool = False):
-        super().__init__(model_spec=get_kwargs())
+        super().__init__(config_spec=get_kwargs())
         self.dim = dim + dim % 2  # make dim even
         self.weights = nn.Parameter(torch.randn(self.dim // 2), requires_grad=not is_random)
 

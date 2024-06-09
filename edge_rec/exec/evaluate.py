@@ -1,10 +1,20 @@
 from ..datasets import Transform, RatingSubgraphData
 
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Set, Tuple
 
 import numpy as np
 from sklearn.metrics import ndcg_score
 import torch
+
+METRIC_NAMES: Set[str] = {
+    'precision',
+    'recall',
+    'mean_reciprocal_rank',
+    'hit_rate',
+    'ndcg',
+}
+
+DEFAULT_TOP_K: Tuple[int, ...] = (1, 5, 10, 20, 30, 40, 50)
 
 
 def _reformat(tensor: torch.Tensor, name: str, dtype=None) -> np.ndarray:
@@ -27,7 +37,7 @@ def compute_metrics_from_ratings(
         train_rating_data: RatingSubgraphData,
         test_rating_data: RatingSubgraphData,
         rating_transform: Optional[Transform] = None,
-        top_ks: Tuple[int, ...] = (1, 5, 10, 20, 30, 40, 50),
+        top_ks: Tuple[int, ...] = DEFAULT_TOP_K,
 ) -> Dict[str, np.ndarray]:
     predicted_ratings_graph = _reformat(predicted_graph, 'predicted_ratings_graph', dtype=float)
     train_known_mask = _reformat(train_rating_data.known_mask, 'train_known_mask', dtype=bool)
@@ -57,7 +67,7 @@ def compute_metrics_from_interactions(
         predicted_graph: torch.Tensor,
         train_rating_data: RatingSubgraphData,
         test_rating_data: RatingSubgraphData,
-        top_ks: Tuple[int, ...] = (1, 5, 10, 20, 30, 40, 50),
+        top_ks: Tuple[int, ...] = DEFAULT_TOP_K,
 ) -> Dict[str, np.ndarray]:
     predicted_interactions_graph = _reformat(predicted_graph, 'predicted_interactions_graph', dtype=float)
     train_known_mask = _reformat(train_rating_data.known_mask, 'train_known_mask', dtype=bool)
@@ -78,7 +88,7 @@ def _compute_metrics(
         train_known_mask: np.ndarray,
         test_ratings_graph: np.ndarray,
         test_known_mask: np.ndarray,
-        top_ks: Tuple[int, ...] = (1, 5, 10, 20, 30, 40, 50),
+        top_ks: Tuple[int, ...] = DEFAULT_TOP_K,
 ) -> Dict[str, np.ndarray]:
     assert len(predicted_ratings_graph.shape) == 2
     assert len(train_known_mask.shape) == 2

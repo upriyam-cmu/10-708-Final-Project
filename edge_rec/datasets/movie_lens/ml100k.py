@@ -1,9 +1,9 @@
-import numpy as np
+from .preprocessing import MovieLensPreprocessingMixin
+
 import pandas as pd
 import torch
 from torch_geometric.data import HeteroData
 from torch_geometric.datasets import MovieLens100K
-from .preprocessing import MovieLensPreprocessingMixin
 
 
 class RawMovieLens100K(MovieLens100K, MovieLensPreprocessingMixin):
@@ -28,11 +28,11 @@ class RawMovieLens100K(MovieLens100K, MovieLensPreprocessingMixin):
     def _load_ratings(self):
         dfs = [
             pd.read_csv(
-                    self.raw_paths[i],
-                    sep='\t',
-                    header=None,
-                    names=self.RATING_HEADERS,
-            ) for i in (2,3)
+                self.raw_paths[i],
+                sep='\t',
+                header=None,
+                names=self.RATING_HEADERS,
+            ) for i in (2, 3)
         ]
         return pd.concat(dfs, ignore_index=True)
 

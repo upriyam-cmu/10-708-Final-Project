@@ -13,15 +13,17 @@ from torch.nn import functional as F
 
 
 def build_feed_forward(in_dim, hidden_dims, out_dim, activation_fn):
-    avg_dim = sqrt(in_dim * out_dim)
-    hidden_dims = [int(avg_dim * h_dim) for h_dim in hidden_dims]
     if len(hidden_dims) != 0 and activation_fn is None:
         raise ValueError("Must specify activation function for feed-forward networks if num hidden layers > 0")
+
+    avg_dim = sqrt(in_dim * out_dim)
+    hidden_dims = [int(avg_dim * h_dim) for h_dim in hidden_dims]
+    activation_fn = eval(activation_fn)
 
     components = []
     for d_in, d_out in zip([in_dim] + hidden_dims, hidden_dims + [out_dim]):
         components.append(nn.Conv2d(d_in, d_out, 1))
-        components.append(activation_fn)
+        components.append(activation_fn())
 
     return nn.Sequential(*components[:-1])
 
@@ -125,7 +127,7 @@ class GraphTransformer(Model):
             attn_kwargs: dict = None,
             feed_forward_kwargs: dict = None,
     ):
-        super().__init__(model_spec=get_kwargs())
+        super().__init__(config_spec=get_kwargs())
         attn_kwargs = {
             **self.__DEFAULT_ATTN_KWARGS,
             **(attn_kwargs or {}),

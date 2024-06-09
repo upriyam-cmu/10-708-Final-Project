@@ -1,5 +1,5 @@
-import pandas as pd
 import numpy as np
+
 
 class MovieLensPreprocessingMixin:
     def _process_genres(self, genres, one_hot=True):

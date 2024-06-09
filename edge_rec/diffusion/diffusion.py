@@ -149,8 +149,10 @@ class GaussianDiffusion(Model):
             offset_noise_strength: float = 0.,  # https://www.crosslabs.org/blog/diffusion-with-offset-noise
             min_snr_loss_weight: bool = False,  # https://arxiv.org/abs/2303.09556
             min_snr_gamma: float = 5,
+            p_losses_weight: float = 1.,
+            bayes_personalized_ranking_loss_weight: float = 0.,
     ):
-        super().__init__(model_spec=get_kwargs())
+        super().__init__(config_spec=get_kwargs())
 
         self.model = model
         self.self_condition = None
@@ -169,6 +171,9 @@ class GaussianDiffusion(Model):
             'or pred_v (predict v [v-parameterization ' \
             'as defined in appendix D of progressive distillation paper, ' \
             'used in imagen-video successfully])'
+
+        self.p_losses_weight = p_losses_weight
+        self.bayes_personalized_ranking_loss_weight = bayes_personalized_ranking_loss_weight
 
         if beta_schedule == 'linear':
             beta_schedule_fn = linear_beta_schedule
@@ -554,6 +559,24 @@ class GaussianDiffusion(Model):
             noise: Optional[torch.Tensor] = None,
             offset_noise_strength: Optional[float] = None,
     ) -> torch.Tensor:
+        return self.compute_loss(
+            rating_data=rating_data,
+            time_steps=time_steps,
+            noise=noise,
+            offset_noise_strength=offset_noise_strength,
+            p_loss_weight=1.,
+            bayes_ranking_weight=0.,
+        )
+
+    def compute_loss(
+            self,
+            rating_data: RatingSubgraphData,
+            time_steps: torch.Tensor,
+            noise: Optional[torch.Tensor] = None,
+            offset_noise_strength: Optional[float] = None,
+            p_loss_weight: float = 1.,
+            bayes_ranking_weight: float = 0.,
+    ) -> torch.Tensor:
         x_start, t, known_mask = rating_data.ratings, time_steps, rating_data.known_mask
         b, c, h, w = x_start.shape
 
@@ -577,29 +600,68 @@ class GaussianDiffusion(Model):
         # this technique will slow down training by 25%, but seems to lower FID significantly
 
         # predict and take gradient step
-        # print(x.shape, t.shape)
         rating_data.ratings = x
         model_out = self.model(rating_data, time_steps)
-        if known_mask is not None:
-            model_out[~known_mask] = 0
 
-        if self.objective == 'pred_noise':
-            target = noise
-        elif self.objective == 'pred_x0':
-            target = x_start
-        elif self.objective == 'pred_v':
-            target = self.predict_v(x_start, t, noise)
+        if p_loss_weight != 0.:
+            if self.objective == 'pred_noise':
+                target = noise
+            elif self.objective == 'pred_x0':
+                target = x_start
+            elif self.objective == 'pred_v':
+                target = self.predict_v(x_start, t, noise)
+            else:
+                raise ValueError(f'Unknown objective {self.objective}')
+
+            if known_mask is not None:
+                model_out[~known_mask] = 0
+                target[~known_mask] = 0
+
+            loss = F.mse_loss(model_out, target, reduction='none')
+
+            # compute final loss
+            loss = reduce(loss, 'b ... -> b', 'mean')
+            loss = loss * extract(self.loss_weight, t, loss.shape)
+            p_loss = loss.mean()
         else:
-            raise ValueError(f'Unknown objective {self.objective}')
+            p_loss = 0.
 
-        if known_mask is not None:
-            target[~known_mask] = 0
+        if bayes_ranking_weight != 0.:
+            if self.objective == 'pred_noise':
+                pred_x_start = self.predict_start_from_noise(x, t, model_out)
+            elif self.objective == 'pred_x0':
+                pred_x_start = model_out
+            elif self.objective == 'pred_v':
+                pred_x_start = self.predict_start_from_v(x, t, model_out)
+            else:
+                assert False, f"unreachable: objective='{self.objective}'"
+            pred_x_start = torch.clamp(pred_x_start, min=-1., max=1.)
 
-        loss = F.mse_loss(model_out, target, reduction='none')
-        loss = reduce(loss, 'b ... -> b', 'mean')
+            # sort along dim -1 (product dim)
+            sort_indices = torch.argsort(x_start, dim=-1, descending=True)
+            pred_x_start = torch.take_along_dim(pred_x_start, sort_indices, dim=-1)
 
-        loss = loss * extract(self.loss_weight, t, loss.shape)
-        return loss.mean()
+            # compute element-wise differences & corresponding loss
+            pxs1, pxs2 = pred_x_start.unsqueeze(dim=-1), pred_x_start.unsqueeze(dim=-2)
+            diffs = pxs1 - pxs2  # second-last dim corresponds to user's preferred choice vs last dim
+            #  --> keep upper triangular portion from last 2 dims
+            loss = -F.logsigmoid(diffs)  # negative log sigmoid of differences
+
+            # mask loss to retain desired sort order & remove unknown ratings
+            loss = torch.triu(loss)  # only keep upper triangular part of diffs
+            if known_mask is not None:
+                known_mask = torch.take_along_dim(known_mask, sort_indices, dim=-1)
+                km1, km2 = known_mask.unsqueeze(dim=-1), known_mask.unsqueeze(dim=-2)
+                loss[~(km1 | km2)] = 0  # mask out any differences involving unknown values
+
+            # compute final loss
+            loss = reduce(loss, 'b ... -> b', 'mean')
+            loss = loss * extract(self.loss_weight, t, loss.shape)
+            bpr_loss = loss.mean()
+        else:
+            bpr_loss = 0.
+
+        return p_loss * p_loss_weight + bpr_loss * bayes_ranking_weight
 
     def forward(self, rating_data: RatingSubgraphData):
         b, c, h, w = rating_data.shape
@@ -609,7 +671,9 @@ class GaussianDiffusion(Model):
         assert h == img_h and w == img_w, f"Expected patch size {(img_h, img_w)}, got {(h, w)}."
         time_steps = torch.randint(0, self.num_time_steps, (b,), device=device).long()
 
-        return self.p_losses(
+        return self.compute_loss(
             rating_data=rating_data,
             time_steps=time_steps,
+            p_loss_weight=self.p_losses_weight,
+            bayes_ranking_weight=self.bayes_personalized_ranking_loss_weight,
         )

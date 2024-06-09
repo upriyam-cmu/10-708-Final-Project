@@ -5,6 +5,8 @@ from ..data import RatingSubgraphData
 from ..data_holder import DataHolder
 from ..transforms import Transform
 
+from ...utils import get_kwargs
+
 from functools import partial
 from typing import Dict, Optional, Tuple, Union
 
@@ -31,6 +33,7 @@ class MovieLensDataHolder(DataHolder):
             dataset_class=(RawMovieLens100K if ml100k else RawMovieLens1M),
             test_split_ratio=test_split,
             force_download=force_download,
+            config_spec=get_kwargs(),
         )
 
         # load rating data

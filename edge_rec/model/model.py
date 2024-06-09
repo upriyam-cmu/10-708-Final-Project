@@ -10,7 +10,7 @@ from torch import nn
 
 class GraphReconstructionModel(RatingDenoisingModel):
     def __init__(self, feature_embedding: FeatureEmbedder, subgraph_model: Model, feature_dim_size: int = None):
-        super().__init__(model_spec=get_kwargs())
+        super().__init__(config_spec=get_kwargs())
         self.embedding = feature_embedding
         self.core_model = subgraph_model
 
