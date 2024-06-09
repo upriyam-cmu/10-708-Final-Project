@@ -23,7 +23,7 @@ class MovieLensDataHolder(DataHolder):
             ml100k: bool = False,
             ml1m: bool = False,
             test_split=0.1,
-            time_aware_split=False,
+            time_aware_split=True,
             force_download=False,
             augmentations: Dict[str, Transform] = None,
     ):
