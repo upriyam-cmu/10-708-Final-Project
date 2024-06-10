@@ -104,7 +104,7 @@ class MovieLensDataHolder(DataHolder):
         else:
             n_test = int(test_split * n_edges)
             train_group.append(np.arange(n_edges)[:-n_test])
-            train_group.append(np.arange(n_edges)[-n_test:])
+            test_group.append(np.arange(n_edges)[-n_test:])
         
         train_group = np.concatenate(train_group)
         test_group = np.concatenate(test_group)
