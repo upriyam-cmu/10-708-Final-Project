@@ -24,6 +24,7 @@ class MovieLensDataHolder(DataHolder):
             ml1m: bool = False,
             test_split=0.1,
             time_aware_split=True,
+            stratify_split_per_user=True,
             force_download=False,
             augmentations: Dict[str, Transform] = None,
     ):
@@ -66,29 +67,43 @@ class MovieLensDataHolder(DataHolder):
         self.top_users, self.top_movies = self._build_density_scores(self.train_edges, self.n_users, self.n_movies)
 
     @staticmethod
-    def _split_edges(edge_indices: torch.Tensor, edge_ratings: torch.Tensor, test_split: float, edge_timestamps: Optional[torch.Tensor] = None):
+    def _split_edges(edge_indices: torch.Tensor, 
+                     edge_ratings: torch.Tensor, 
+                     test_split: float, 
+                     edge_timestamps: Optional[torch.Tensor] = None, 
+                     stratify_per_user: Optional[bool] = True
+    ):
         n_edges = len(edge_ratings)
 
         edge_indices, edge_ratings = edge_indices.numpy(), edge_ratings.numpy()
         
-        indices_to_sort, sort_by = [edge_indices[0]], [0]
+        indices_to_sort = []
+        if stratify_per_user:
+            indices_to_sort.append(edge_indices[0])
         if edge_timestamps is not None:
             edge_timestamps = edge_timestamps.numpy()
             indices_to_sort.append(edge_timestamps)
-            sort_by.append(1)
+        
+        sort_by = list(range(len(indices_to_sort)))
         indices_df = pd.DataFrame(np.stack(indices_to_sort).T)
         sort_indices = indices_df.sort_values(sort_by).reset_index()["index"].to_numpy()
 
         edge_indices, edge_ratings = edge_indices[:, sort_indices], edge_ratings[sort_indices]
         train_group, test_group = [], []
         _, split_indices = np.unique(edge_indices[0], return_index=True)
-        for edge_group in np.split(np.arange(n_edges), split_indices[1:]):
-            if edge_timestamps is None:
-                np.random.shuffle(edge_group)   
-            n_test = int(test_split * len(edge_group))
-            train_group.append(edge_group[:-n_test])
-            test_group.append(edge_group[-n_test:])
 
+        if stratify_per_user:
+            for edge_group in np.split(np.arange(n_edges), split_indices[1:]):
+                if edge_timestamps is None:
+                    np.random.shuffle(edge_group)   
+                n_test = int(test_split * len(edge_group))
+                train_group.append(edge_group[:-n_test])
+                test_group.append(edge_group[-n_test:])
+        else:
+            n_test = int(test_split * n_edges)
+            train_group.append(np.arange(n_edges)[:-n_test])
+            train_group.append(np.arange(n_edges)[-n_test:])
+        
         train_group = np.concatenate(train_group)
         test_group = np.concatenate(test_group)
 
