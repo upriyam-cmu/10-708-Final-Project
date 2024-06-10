@@ -38,7 +38,7 @@ def init():
         n_channels_internal=3,
         n_features=embed.output_sizes,
         time_embedder=SinusoidalPositionalEmbedding(16),
-        attn_kwargs=dict(heads=4, dim_head=32, num_mem_kv=3, speed_hack=True, share_weights=False, dropout=0.1),
+        attn_kwargs=dict(heads=4, dim_head=32, num_mem_kv=3, speed_hack=True, share_weights=False, dropout=0.25),
         feed_forward_kwargs=dict(hidden_dims=(2, 2), activation_fn="nn.SiLU"),
     )
     model = GraphReconstructionModel(embed, core, feature_dim_size=None)
@@ -50,9 +50,7 @@ def init():
     diffusion_model = GaussianDiffusion(
         model=model,
         image_size=50,
-        offset_noise_strength=0.1,
-        p_losses_weight=0.75,
-        bayes_personalized_ranking_loss_weight=0.25,
+        offset_noise_strength=0.15,
     )
     trainer = Trainer(
         # model
@@ -65,8 +63,9 @@ def init():
         batch_size=16,
         gradient_accumulate_every=1,
         force_batch_size=True,
-        train_num_steps=int(1e4),
+        train_num_steps=int(2.5e4),
         train_mask_unknown_ratings=True,
+        loss_weights=('adaptive', 0.8 ** (1 / 5000), 10),
         # eval
         eval_batch_size=None,  # copy training batch size if None
         n_eval_iters=10,

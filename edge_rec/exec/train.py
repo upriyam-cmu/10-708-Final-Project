@@ -64,6 +64,7 @@ class Trainer(object):
             force_batch_size: bool = False,
             train_num_steps: int = 100000,
             train_mask_unknown_ratings: bool = True,
+            loss_weights: Tuple[str, float, float] = ('fixed', 1., 0.),  # value[0] == 'fixed' or 'adaptive'
             # eval
             eval_batch_size: Optional[int] = None,  # copies training batch size if None
             n_eval_iters: int = 1,
@@ -139,6 +140,12 @@ class Trainer(object):
             )
         else:
             self.train_loader, self.test_loader = None, None
+
+        if loss_weights[0] not in ('fixed', 'adaptive'):
+            raise ValueError(
+                f"First element of loss weights must be either 'fixed' or 'adaptive'. Got {loss_weights[0]}."
+            )
+        self.loss_weights: Tuple[str, float, float] = loss_weights
 
         # optimizer
 
@@ -240,7 +247,16 @@ class Trainer(object):
 
             while self.step < self.train_num_steps:
 
-                total_loss = 0.
+                weights_type, v0, v1 = self.loss_weights
+                if weights_type == 'fixed':
+                    p_losses_weights, bpr_loss_weights = v0, v1
+                elif weights_type == 'adaptive':
+                    p_losses_weights = v0 ** self.step
+                    bpr_loss_weights = v1 * (1 - p_losses_weights)
+                else:
+                    assert False, f"unreachable: forgot to handle weights_type == '{weights_type}'"
+
+                total_loss, total_p_losses, total_bpr_loss = 0, 0, 0
                 self.model.train()
 
                 for _ in range(self.gradient_accumulate_every):
@@ -249,13 +265,21 @@ class Trainer(object):
                         data.known_mask = None
 
                     with self.accelerator.autocast():
-                        loss = self.model(data)
+                        p_losses, bpr_loss = self.model(data)
+                        loss = p_losses * p_losses_weights + bpr_loss * bpr_loss_weights
                         loss = loss / self.gradient_accumulate_every
+
                         total_loss += loss.item()
+                        total_p_losses += p_losses.item()
+                        total_bpr_loss += bpr_loss.item()
 
                     self.accelerator.backward(loss)
 
-                self.logger.log(train_loss=total_loss)
+                self.logger.log(
+                    train_loss=total_loss,
+                    train_dif_loss=(total_p_losses / self.gradient_accumulate_every),
+                    train_bpr_loss=(total_bpr_loss / self.gradient_accumulate_every),
+                )
                 training_loss_deque.append(total_loss)
 
                 accelerator.wait_for_everyone()
@@ -274,9 +298,10 @@ class Trainer(object):
                         self.save(self.step)
 
                         if self.score_on_save:
+                            # TODO make these arguments configurable
                             metrics = self.score(
-                                predicting_ratings=True,  # TODO make configurable
-                                n_samples=10,
+                                predicting_ratings=True,
+                                n_samples=3,
                                 do_inpainting_sampling=True,
                             )
 
@@ -291,15 +316,24 @@ class Trainer(object):
                         self.model.eval()
 
                         with torch.inference_mode():
-                            val_loss = 0.
+                            val_loss, val_p_losses, val_bpr_loss = 0, 0, 0
                             for _ in tqdm(range(self.n_eval_iters), desc="model eval"):
                                 eval_data = _get(self.test_loader).to(device)
                                 eval_data.ratings, eval_data.known_mask = torch.randn_like(eval_data.ratings) / 3, None
 
-                                val_loss += self.model(eval_data).item()
+                                p_losses, bpr_loss = self.model(eval_data)
+                                loss = p_losses * p_losses_weights + bpr_loss * bpr_loss_weights
+
+                                val_loss += loss.item()
+                                val_p_losses += p_losses.item()
+                                val_bpr_loss += bpr_loss.item()
 
                             validation_loss = val_loss / self.n_eval_iters
-                            self.logger.log(validation_loss=validation_loss)
+                            self.logger.log(
+                                validation_loss=validation_loss,
+                                validation_dif_loss=(val_p_losses / self.n_eval_iters),
+                                validation_bpr_loss=(val_bpr_loss / self.n_eval_iters),
+                            )
 
                             if self.sample_on_eval:
                                 self.eval(
@@ -309,7 +343,7 @@ class Trainer(object):
 
                 train_loss = sum(training_loss_deque) / len(training_loss_deque)
 
-                self.logger.log(step=self.step, commit=True)
+                self.logger.log(loss_ratio=(validation_loss / train_loss), step=self.step, commit=True)
                 pbar.set_postfix(train_loss=f"{train_loss:.4f}", valid_loss=f"{validation_loss:.4f}")
                 pbar.update(1)
 

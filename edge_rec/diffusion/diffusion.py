@@ -149,8 +149,6 @@ class GaussianDiffusion(Model):
             offset_noise_strength: float = 0.,  # https://www.crosslabs.org/blog/diffusion-with-offset-noise
             min_snr_loss_weight: bool = False,  # https://arxiv.org/abs/2303.09556
             min_snr_gamma: float = 5,
-            p_losses_weight: float = 1.,
-            bayes_personalized_ranking_loss_weight: float = 0.,
     ):
         super().__init__(config_spec=get_kwargs())
 
@@ -171,9 +169,6 @@ class GaussianDiffusion(Model):
             'or pred_v (predict v [v-parameterization ' \
             'as defined in appendix D of progressive distillation paper, ' \
             'used in imagen-video successfully])'
-
-        self.p_losses_weight = p_losses_weight
-        self.bayes_personalized_ranking_loss_weight = bayes_personalized_ranking_loss_weight
 
         if beta_schedule == 'linear':
             beta_schedule_fn = linear_beta_schedule
@@ -559,14 +554,15 @@ class GaussianDiffusion(Model):
             noise: Optional[torch.Tensor] = None,
             offset_noise_strength: Optional[float] = None,
     ) -> torch.Tensor:
-        return self.compute_loss(
+        p_losses, _ = self.compute_loss(
             rating_data=rating_data,
             time_steps=time_steps,
             noise=noise,
             offset_noise_strength=offset_noise_strength,
-            p_loss_weight=1.,
-            bayes_ranking_weight=0.,
+            include_p_losses=True,
+            include_bpr_loss=False,
         )
+        return p_losses
 
     def compute_loss(
             self,
@@ -574,9 +570,9 @@ class GaussianDiffusion(Model):
             time_steps: torch.Tensor,
             noise: Optional[torch.Tensor] = None,
             offset_noise_strength: Optional[float] = None,
-            p_loss_weight: float = 1.,
-            bayes_ranking_weight: float = 0.,
-    ) -> torch.Tensor:
+            include_p_losses: bool = True,
+            include_bpr_loss: bool = True,
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         x_start, t, known_mask = rating_data.ratings, time_steps, rating_data.known_mask
         b, c, h, w = x_start.shape
 
@@ -603,7 +599,7 @@ class GaussianDiffusion(Model):
         rating_data.ratings = x
         model_out = self.model(rating_data, time_steps)
 
-        if p_loss_weight != 0.:
+        if include_p_losses:
             if self.objective == 'pred_noise':
                 target = noise
             elif self.objective == 'pred_x0':
@@ -624,9 +620,9 @@ class GaussianDiffusion(Model):
             loss = loss * extract(self.loss_weight, t, loss.shape)
             p_loss = loss.mean()
         else:
-            p_loss = 0.
+            p_loss = None
 
-        if bayes_ranking_weight != 0.:
+        if include_bpr_loss:
             if self.objective == 'pred_noise':
                 pred_x_start = self.predict_start_from_noise(x, t, model_out)
             elif self.objective == 'pred_x0':
@@ -659,11 +655,11 @@ class GaussianDiffusion(Model):
             loss = loss * extract(self.loss_weight, t, loss.shape)
             bpr_loss = loss.mean()
         else:
-            bpr_loss = 0.
+            bpr_loss = None
 
-        return p_loss * p_loss_weight + bpr_loss * bayes_ranking_weight
+        return p_loss, bpr_loss
 
-    def forward(self, rating_data: RatingSubgraphData):
+    def forward(self, rating_data: RatingSubgraphData) -> Tuple[torch.Tensor, torch.Tensor]:
         b, c, h, w = rating_data.shape
         device = rating_data.ratings.device
         img_h, img_w = self.image_size
@@ -674,6 +670,6 @@ class GaussianDiffusion(Model):
         return self.compute_loss(
             rating_data=rating_data,
             time_steps=time_steps,
-            p_loss_weight=self.p_losses_weight,
-            bayes_ranking_weight=self.bayes_personalized_ranking_loss_weight,
+            include_p_losses=True,
+            include_bpr_loss=True,
         )
