@@ -88,6 +88,11 @@ class RawMovieLens1M(MovieLens1M, MovieLensPreprocessingMixin):
         data['movie', 'rated_by', 'user'].rating = rating
         data['movie', 'rated_by', 'user'].time = time
 
+        df["movieId"] = df["movieId"].apply(lambda x: movie_mapping[x])
+        user_history = self._generate_user_history(df, 30)
+
+        data['user', 'rates', 'movie'].history = torch.from_numpy(user_history)
+
         if self.pre_transform is not None:
             data = self.pre_transform(data)
 
