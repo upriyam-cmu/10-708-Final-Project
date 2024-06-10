@@ -45,7 +45,8 @@ class MovieLensDataHolder(DataHolder):
             data[('user', 'rates', 'movie')]['edge_index'],
             data[('user', 'rates', 'movie')]['rating'],
             test_split=test_split,
-            edge_timestamps=data[('user', 'rates', 'movie')]['time'] if time_aware_split else None
+            edge_timestamps=data[('user', 'rates', 'movie')]['time'] if time_aware_split else None,
+            stratify_per_user=stratify_split_per_user
         )
 
         # initialize data transforms
