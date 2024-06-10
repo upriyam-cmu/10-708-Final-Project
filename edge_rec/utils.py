@@ -142,18 +142,23 @@ class DataLogger:
         for k, v in values.items():
             # get dict to update based on value type
             if isinstance(v, Number):
-                dict_ = numerical_stats
+                is_numerical = True
                 for prefix in self._ignore_numeric:
                     if k.startswith(prefix):
-                        dict_ = misc_stats
+                        is_numerical = False
                         break
             else:
-                dict_ = misc_stats
+                is_numerical = False
 
             # update dict
-            if k not in dict_:
-                dict_[k] = []
-            dict_[k].append(v)
+            if is_numerical:
+                if k not in numerical_stats:
+                    numerical_stats[k] = []
+                elif np.isnan(numerical_stats[k][-1]):
+                    numerical_stats[k].pop()  # replace nan value instead of simply appending
+                numerical_stats[k].append(v)
+            else:
+                misc_stats[k] = v
 
         # log that keys were updated
         was_updated.update(values.keys())
@@ -185,6 +190,7 @@ class DataLogger:
 
             # bookkeeping
             was_updated.clear()
+            misc_stats.clear()
             self._step += 1
 
 
