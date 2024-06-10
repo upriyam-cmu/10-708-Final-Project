@@ -74,6 +74,7 @@ class MovieLensDataHolder(DataHolder):
                      edge_timestamps: Optional[torch.Tensor] = None, 
                      stratify_per_user: Optional[bool] = True
     ):
+        assert edge_timestamps is not None or stratify_per_user
         n_edges = len(edge_ratings)
 
         edge_indices, edge_ratings = edge_indices.numpy(), edge_ratings.numpy()
